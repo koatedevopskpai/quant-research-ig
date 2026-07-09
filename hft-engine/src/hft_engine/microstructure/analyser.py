@@ -169,12 +169,24 @@ class MicrostructureAnalyser:
         to changing market conditions while smoothing out noise.
     """
 
-    def __init__(self, window_size: int = 100) -> None:
-        self._window_size = window_size
-        # Rolling window of spreads (bid-ask differences)
-        self._spreads: list[float] = []
-        # Rolling window of relative spreads (spread / mid_price)
-        self._relative_spreads: list[float] = []
+    def __init__(self, window_size: int = 100, use_cpp: bool | None = None) -> None:
+        if use_cpp is None:
+            try:
+                import importlib
+                _mod = importlib.import_module("hft_engine.hft_cpp")
+                use_cpp = _mod is not None
+            except (ImportError, ModuleNotFoundError):
+                use_cpp = False
+        self._use_cpp = use_cpp
+        if use_cpp:
+            import importlib
+            _mod = importlib.import_module("hft_engine.hft_cpp")
+            self._cpp_analyser = _mod.MicrostructureAnalyser(window_size)
+        else:
+            self._cpp_analyser = None
+            self._window_size = window_size
+            self._spreads: list[float] = []
+            self._relative_spreads: list[float] = []
 
     # ------------------------------------------------------------------
     # Tick processing
@@ -191,6 +203,13 @@ class MicrostructureAnalyser:
             book: Optional order book for context (needed for quote-based
                   analytics like depth profiles).
         """
+        if self._cpp_analyser is not None:
+            if msg.message_type == "L1":
+                self._cpp_analyser.on_tick(
+                    msg.message_type, msg.bid_price, msg.ask_price,
+                    msg.bid_size, msg.ask_size,
+                )
+            return
         if msg.message_type == "L1":
             self._record_spread(msg)
 
@@ -210,7 +229,6 @@ class MicrostructureAnalyser:
         self._spreads.append(spread)
         self._relative_spreads.append(rel_spread)
 
-        # Trim window
         if len(self._spreads) > self._window_size:
             self._spreads.pop(0)
             self._relative_spreads.pop(0)
@@ -222,6 +240,16 @@ class MicrostructureAnalyser:
         Returns:
             SpreadMetrics with mean, std, min, max, and relative spread.
         """
+        if self._cpp_analyser is not None:
+            cpp_metrics = self._cpp_analyser.spread_stats()
+            return SpreadMetrics(
+                mean=round(cpp_metrics.mean, 4),
+                std=round(cpp_metrics.std, 4),
+                min=round(cpp_metrics.min, 4),
+                max=round(cpp_metrics.max, 4),
+                relative=round(cpp_metrics.relative, 6),
+                count=cpp_metrics.count,
+            )
         if not self._spreads:
             return SpreadMetrics()
 
@@ -270,13 +298,30 @@ class MicrostructureAnalyser:
         Returns:
             DepthProfile with volume and imbalance metrics.
         """
+        if getattr(book, '_cpp_book', None) is not None:
+            try:
+                import importlib
+                cpp = importlib.import_module("hft_engine.hft_cpp")
+                profile = cpp.MicrostructureAnalyser.current_depth(
+                    book._cpp_book, max_levels)
+                bid_levels = [(p.price, p.size) for p in profile.bid_levels]
+                ask_levels = [(p.price, p.size) for p in profile.ask_levels]
+                return DepthProfile(
+                    bid_levels=bid_levels,
+                    ask_levels=ask_levels,
+                    total_bid_volume=profile.total_bid_volume,
+                    total_ask_volume=profile.total_ask_volume,
+                    imbalance=profile.imbalance,
+                    weighted_mid=round(profile.weighted_mid, 4),
+                )
+            except Exception:
+                pass
         l2 = book.l2_snapshot(max_levels)
         depth = book.depth_summary(max_levels)
 
         bid_levels = [(lev.price, lev.size) for lev in l2.bids]
         ask_levels = [(lev.price, lev.size) for lev in l2.asks]
 
-        # Weighted mid-price: volume-weighted average across all levels
         total_vol = depth.bid_volume + depth.ask_volume
         weighted_mid = 0.0
         if total_vol > 0:
@@ -327,6 +372,20 @@ class MicrostructureAnalyser:
         Returns:
             TradeSignResult with side, price, size, and confidence.
         """
+        if getattr(book, '_cpp_book', None) is not None:
+            try:
+                import importlib
+                cpp = importlib.import_module("hft_engine.hft_cpp")
+                result = cpp.MicrostructureAnalyser.classify_trade(
+                    trade_price, trade_size, book._cpp_book)
+                return TradeSignResult(
+                    side=result.side,
+                    price=result.price,
+                    size=result.size,
+                    confidence=result.confidence,
+                )
+            except Exception:
+                pass
         try:
             l1 = book.l1_snapshot()
         except ValueError:
@@ -349,7 +408,6 @@ class MicrostructureAnalyser:
                 side="sell", price=trade_price, size=trade_size, confidence=confidence
             )
         else:
-            # Inside the spread — classify by position relative to mid
             if trade_price >= mid:
                 return TradeSignResult(
                     side="buy",

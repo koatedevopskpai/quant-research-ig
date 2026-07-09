@@ -190,11 +190,11 @@ class OrderBook:
         For an L2 book with ~20 levels per side (typical for IG indices),
         all operations complete in microseconds in pure Python.
 
-    WHY PURE PYTHON (for now):
-        The Python implementation serves as the reference and prototype.
-        The hot path (diff application) will be ported to C++ via pybind11
-        in the cpp/ directory. The Python version is adequate for backtesting
-        and paper trading at IG's update frequencies (~100ms per tick).
+    C++ ACCELERATION:
+        When hft_cpp module is available (build with `pip install .[cpp]`),
+        the hot path (diff application) delegates to the C++ implementation
+        for 10–100× latency improvement. Query methods l1_snapshot/l2_snapshot/
+        depth_summary still convert to Python types for API compatibility.
 
     NOTE ON IG's DATA FORMAT:
         IG sends L2 data as price level updates via Lightstreamer.
@@ -203,13 +203,23 @@ class OrderBook:
         to 0 and is not used in diff application.
     """
 
-    def __init__(self) -> None:
-        # WHY using lists with bisect instead of SortedList from bisect:
-        #   Avoiding external dependencies. Python's built-in bisect module
-        #   combined with list.insert/delete is O(K) for insertion but
-        #   K ≤ 100 for typical L2 books, so the cost is negligible.
-        self._bids: list[PriceLevel] = []
-        self._asks: list[PriceLevel] = []
+    def __init__(self, use_cpp: bool | None = None) -> None:
+        if use_cpp is None:
+            try:
+                import importlib
+                _mod = importlib.import_module("hft_engine.hft_cpp")
+                use_cpp = _mod is not None
+            except (ImportError, ModuleNotFoundError):
+                use_cpp = False
+        self._use_cpp = use_cpp
+        if use_cpp:
+            import importlib
+            _mod = importlib.import_module("hft_engine.hft_cpp")
+            self._cpp_book = _mod.OrderBook()
+        else:
+            self._cpp_book = None
+            self._bids: list[PriceLevel] = []
+            self._asks: list[PriceLevel] = []
 
     # ------------------------------------------------------------------
     # Diff application
@@ -239,19 +249,21 @@ class OrderBook:
             price". This is the delete signal. Never trust that a feed will
             explicitly say "delete" — interpret zero as deletion.
         """
+        if self._cpp_book is not None:
+            self._cpp_book.apply_diff(side, price, size, order_count)
+            return
+
         level = PriceLevel(price, size, order_count)
 
         if side == "ask":
-            # Asks are sorted ascending by price
             idx = self._find_price_index(self._asks, price, reverse=False)
             if size == 0:
                 if idx is not None:
                     del self._asks[idx]
             else:
                 if idx is not None:
-                    self._asks[idx] = level  # update
+                    self._asks[idx] = level
                 else:
-                    # Insert in ascending sorted position
                     insert_idx = 0
                     for i, lev in enumerate(self._asks):
                         if price < lev.price:
@@ -260,16 +272,14 @@ class OrderBook:
                         insert_idx = i + 1
                     self._asks.insert(insert_idx, level)
         else:
-            # Bids are sorted descending by price
             idx = self._find_price_index(self._bids, price, reverse=True)
             if size == 0:
                 if idx is not None:
                     del self._bids[idx]
             else:
                 if idx is not None:
-                    self._bids[idx] = level  # update
+                    self._bids[idx] = level
                 else:
-                    # Insert in descending sorted position
                     insert_idx = 0
                     for i, lev in enumerate(self._bids):
                         if price > lev.price:
@@ -293,7 +303,13 @@ class OrderBook:
             have gaps. Requesting a full snapshot and replacing the book
             ensures consistency without reconciliation logic.
         """
-        # Sort bids descending, asks ascending
+        if self._cpp_book is not None:
+            import importlib
+            cpp = importlib.import_module("hft_engine.hft_cpp")
+            cpp_bids = [cpp.PriceLevel(p.price, p.size, p.order_count) for p in bids]
+            cpp_asks = [cpp.PriceLevel(p.price, p.size, p.order_count) for p in asks]
+            self._cpp_book.apply_snapshot(cpp_bids, cpp_asks)
+            return
         self._bids = sorted(bids, key=lambda x: x.price, reverse=True)
         self._asks = sorted(asks, key=lambda x: x.price)
 
@@ -310,6 +326,17 @@ class OrderBook:
         Raises:
             ValueError: If the book is empty on either side.
         """
+        if self._cpp_book is not None:
+            try:
+                cpp_l1 = self._cpp_book.l1_snapshot()
+            except RuntimeError as e:
+                raise ValueError(str(e))
+            return L1Snapshot(
+                bid_price=cpp_l1.bid_price,
+                bid_size=cpp_l1.bid_size,
+                ask_price=cpp_l1.ask_price,
+                ask_size=cpp_l1.ask_size,
+            )
         if not self._bids or not self._asks:
             raise ValueError("Book is empty — no L1 snapshot available")
 
@@ -332,6 +359,12 @@ class OrderBook:
         Returns:
             L2Snapshot with bid and ask price levels.
         """
+        if self._cpp_book is not None:
+            effective = max_levels if max_levels > 0 else 1000
+            cpp_l2 = self._cpp_book.l2_snapshot(effective)
+            bids = [PriceLevel(p.price, p.size, p.order_count) for p in cpp_l2.bids]
+            asks = [PriceLevel(p.price, p.size, p.order_count) for p in cpp_l2.asks]
+            return L2Snapshot(bids=bids, asks=asks, timestamp=cpp_l2.timestamp)
         if max_levels > 0:
             return L2Snapshot(
                 bids=list(self._bids[:max_levels]),
@@ -353,6 +386,15 @@ class OrderBook:
         Quant Beckman uses imbalance as a feature in regime detection models.
         Bryan Downing uses it for order flow toxicity detection.
         """
+        if self._cpp_book is not None:
+            effective = max_levels if max_levels > 0 else 1000
+            cpp_depth = self._cpp_book.depth_summary(effective)
+            return BookDepth(
+                bid_volume=cpp_depth.bid_volume,
+                ask_volume=cpp_depth.ask_volume,
+                num_bid_levels=cpp_depth.num_bid_levels,
+                num_ask_levels=cpp_depth.num_ask_levels,
+            )
         l2 = self.l2_snapshot(max_levels)
         bid_vol = sum(lev.size for lev in l2.bids)
         ask_vol = sum(lev.size for lev in l2.asks)
