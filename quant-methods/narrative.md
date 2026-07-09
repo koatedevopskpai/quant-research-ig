@@ -1,27 +1,41 @@
 # quant-methods — Quantitative Methods & Pricing Models
 
 ## Objective
-Implement classical quant finance models: Black-Scholes, binomial trees,
-Monte Carlo simulation, GARCH volatility modelling, and portfolio
-optimisation — all backtested against real IG market data.
+Implement classical quant finance models and Quant Beckman's statistical
+validation framework: Black-Scholes, binomial trees, Monte Carlo, GARCH,
+portfolio optimisation, plus falsification via PSR/DSR/CPCV/WFA.
 
-This is the **Phase 2a** deliverable in the STRATEGY.md roadmap. These models
-convert raw IG market data into actionable trading signals: option prices,
-volatility forecasts, and portfolio allocations. Every model includes heavy
-narrative comments explaining WHY each design decision was made — not just
-WHAT the code does.
+This spans **Phase 2a (Classical Models)** and **Phase 4 (Validation
+Framework)** in the STRATEGY.md roadmap.
 
-## Projects (Completed — Phase 2a)
-1. **Black-Scholes Pricer** — European option pricing + Greeks (delta, gamma,
-   vega, theta, rho). Validated against Hull (2022) reference values.
-2. **Binomial Tree** — CRR lattice for American/European options. Validated
-   by convergence to BSM within 0.02 (N=500 steps).
-3. **Monte Carlo Engine** — GBM simulation with standard, Asian (arithmetic
-   average), and barrier (up-and-out, down-and-out) payoff functions.
-4. **GARCH Volatility** — GARCH(1,1) model with gradient descent MLE.
-   Forecasts future vol with mean-reversion diagnostics.
-5. **Portfolio Optimisation** — Mean-variance (Markowitz 1952), risk parity
-   (equal risk contribution), and Black-Litterman (Bayesian view blending).
+## Projects
+
+### Phase 2a — Classical Models (Completed)
+1. **Black-Scholes Pricer** — European options + Greeks (delta, gamma, vega,
+   theta, rho). Validated against Hull (2022).
+2. **Binomial Tree** — CRR lattice for American/European options. Converges
+   to BSM within 0.02 (N=500 steps).
+3. **Monte Carlo Engine** — GBM with standard, Asian, and barrier payoffs.
+4. **GARCH Volatility** — GARCH(1,1) via gradient descent MLE with
+   mean-reversion diagnostics.
+5. **Portfolio Optimisation** — Mean-variance, risk parity, Black-Litterman.
+
+### Phase 4 — Validation Framework (Completed)
+6. **Backtester** — Vectorised strategy evaluation (Sharpe, Sortino, Calmar,
+   max DD, win rate, profit factor) with benchmark alpha/beta/IR.
+7. **Monkey Test** — Quant Beckman's permutation falsification: shuffle
+   returns N times, compare actual Sharpe to null distribution, get p-value.
+8. **Probabilistic Sharpe Ratio** — Bailey & López de Prado (2012). PSR(SR*)
+   = probability that true Sharpe exceeds a threshold, corrected for
+   skewness and kurtosis.
+9. **Deflated Sharpe Ratio** — Bailey & López de Prado (2014). Corrects PSR
+   for multiple testing using expected max Sharpe under N trials.
+10. **Block Bootstrap** — Circular block bootstrap (Politis & Romano) for
+    confidence intervals on any metric, preserving serial dependence.
+11. **Combinatorial Purged CV** — López de Prado (2018). C(N,K) train/test
+    splits with embargo purging, OOS Sharpe distribution.
+12. **Walk-Forward Analysis** — Anchored/rolling re-optimisation windows
+    with OOS concatenation and robustness diagnostics.
 
 ## Key Module Map
 | Module | Class | Purpose |
@@ -33,16 +47,18 @@ WHAT the code does.
 | portfolio/mean_variance.py | `MeanVarianceOptimiser` | Min var, max Sharpe, efficient frontier |
 | portfolio/risk_parity.py | `RiskParity` | Equal risk contribution portfolio |
 | portfolio/black_litterman.py | `BlackLitterman` | Bayesian return blending |
+| validation/backtester.py | `Backtester` | Vectorised strategy performance metrics |
+| validation/monkey_test.py | `MonkeyTest` | Permutation falsification test |
+| validation/psr.py | `ProbabilisticSharpeRatio` | PSR with skew/kurtosis correction |
+| validation/dsr.py | `DeflatedSharpeRatio` | DSR with multiple-testing correction |
+| validation/bootstrap.py | `BlockBootstrap` | Circular block bootstrap CI |
+| validation/cpcv.py | `CombinatorialPurgedCV` | Purged cross-validation |
+| validation/wfa.py | `WalkForwardAnalysis` | Anchored/rolling walk-forward |
 
 ## Status
-- [x] Project skeleton (pyproject.toml, package structure)
-- [x] Data dependency on ig-market-data established
-- [x] Black-Scholes with Greeks (11 tests)
-- [x] CRR Binomial Tree — European convergence, American early exercise (9 tests)
-- [x] Monte Carlo Engine — standard, Asian, barrier payoffs (10 tests)
-- [x] GARCH(1,1) — persistence, forecast, diagnostics (7 tests)
-- [x] Portfolio — Markowitz, risk parity, Black-Litterman (18 tests)
-- [x] **All 55 tests passing**
+- [x] Phase 2a — Black-Scholes, binomial tree, Monte Carlo, GARCH, portfolio (55 tests)
+- [x] Phase 4 — Backtester, Monkey Test, PSR, DSR, Bootstrap, CPCV, WFA (51 tests)
+- [x] **All 106 tests passing**
 
 ---
 
@@ -215,8 +231,125 @@ equilibrium.
 
 ---
 
+---
+
+### ADR-005: PSR/DSR over Simple Sharpe Ratio for Strategy Selection
+
+**Status**: Accepted
+
+**Context**: A strategy's Sharpe ratio is a point estimate with no measure
+of uncertainty. Strategies with high Sharpe from short histories are likely
+overfitted. We need a probabilistic framework for comparing strategies.
+
+**Decision**: Use PSR (Probabilistic Sharpe Ratio) for single-strategy
+evaluation and DSR (Deflated Sharpe Ratio) when comparing across multiple
+strategies.
+
+**Rationale**:
+- PSR accounts for skewness and kurtosis in returns — a strategy with
+  positive skew (occasional big wins) is more likely to be real than one
+  with negative skew (occasional big losses), even at the same Sharpe.
+- DSR corrects for the multiple-testing bias: if you try 100 strategies,
+  the best one will have inflated Sharpe by chance. The expected max Sharpe
+  under the null is estimated and used as the deflated threshold.
+- The standard Sharpe ratio ignores these effects, leading to overly
+  optimistic strategy selection.
+
+**Consequences**:
+- PSR >= 0.95 → strategy's true Sharpe likely exceeds threshold.
+- DSR >= 0.95 → strategy survives multiple-testing correction.
+- Both are implemented in the validation framework and integrated with
+  the Monkey Test for a comprehensive falsification pipeline.
+
+---
+
+### ADR-006: Permutation Test (Monkey Test) over Parametric Null
+
+**Status**: Accepted
+
+**Context**: Testing whether a strategy's performance is statistically
+significant requires a null distribution. Options: parametric (assume
+normal returns) or non-parametric (permutation test).
+
+**Decision**: Non-parametric permutation test that shuffles actual returns.
+
+**Rationale**:
+- Financial returns are non-normal (fat tails, skewness, autocorrelation).
+  A parametric null (e.g., t-test) will overstate significance.
+- Shuffling preserves the empirical distribution of returns — magnitudes
+  are unchanged, only the sequence is randomised.
+- This directly answers the question: "What fraction of random timing
+  decisions would produce this result?"
+
+**Consequences**:
+- p-value = (count_null >= actual + 1) / (N + 1). p < 0.05 is significant.
+- Custom statistic functions are supported (default is Sharpe ratio).
+- Deterministic with random_seed for reproducibility.
+
+---
+
+### ADR-007: Circular Block Bootstrap over IID Bootstrap
+
+**Status**: Accepted
+
+**Context**: Confidence intervals for performance metrics require
+resampling that preserves the dependence structure of time series data.
+
+**Decision**: Circular block bootstrap (Politis & Romano, 1992) with
+optimal block size L = ceil(T^(1/3)).
+
+**Rationale**:
+- IID bootstrap destroys autocorrelation and volatility clustering,
+  leading to artificially narrow confidence intervals.
+- Circular block bootstrap wraps the series into a circle, handling
+  end-of-series boundary effects naturally.
+- The optimal block size L ~ T^(1/3) minimises mean squared error
+  of the variance estimate under weak dependence conditions.
+- Block size defaults to this value but is user-configurable.
+
+**Consequences**:
+- Returns are resampled in blocks, preserving short-term dependence.
+- The result includes both percentile-based CI and bootstrap standard
+  error.
+- A dedicated `sharpe_ratio()` method wraps the general
+  `confidence_interval()` for convenience.
+
+---
+
+### ADR-008: Combinatorial Purged CV over Standard Time-Series Split
+
+**Status**: Accepted
+
+**Context**: Walk-forward and standard time-series splits evaluate a
+strategy on a single path of train/test assignments. Each observation
+appears in the test set only once, leading to high variance.
+
+**Decision**: Combinatorial Purged Cross-Validation (CPCV) with embargo
+purging and sub-sampling of C(N, K) combinations.
+
+**Rationale**:
+- CPCV puts every observation in a test set multiple times (across
+  different combinations), reducing the variance of OOS performance.
+- The embargo period prevents forward-looking bias by purging training
+  data too close to the test boundary.
+- Sub-sampling C(N, K) combinations (default max 100) keeps computation
+  tractable while maintaining the diversity benefit.
+
+**Consequences**:
+- OOS Sharpe distribution (mean, std, min, max) across all combinations.
+- Significant if mean - 2 * std > 0 (i.e., 95% of OOS Sharpes are positive).
+- The WFA (Walk-Forward Analysis) module offers complementary anchored
+  and rolling modes for production-like re-optimisation simulation.
+
+---
+
 ## References
 
+- Bailey, D. & López de Prado, M. (2012). The Sharpe Ratio Efficient
+  Frontier. *Journal of Risk*, 15(2).
+- Bailey, D. & López de Prado, M. (2014). The Deflated Sharpe Ratio:
+  Correcting for Multiple Testing, Selection Bias, and Non-Normality.
+  *Journal of Portfolio Management*, 40(3).
 - Black, F., & Scholes, M. (1973). The Pricing of Options and Corporate
   Liabilities. *Journal of Political Economy*, 81(3).
 - Black, F., & Litterman, R. (1992). Global Portfolio Optimization.
@@ -229,9 +362,13 @@ equilibrium.
   Approach. *Journal of Financial Economics*, 7(3).
 - Hull, J. (2022). *Options, Futures, and Other Derivatives* (11th ed.),
   Chapters 13, 21, 22, 24.
+- López de Prado, M. (2018). *Advances in Financial Machine Learning*.
+  Wiley. Chapters 12-14.
 - Maillard, S., Roncalli, T., & Teiletche, J. (2010). The Properties of
   Equally Weighted Risk Contribution Portfolios. *Journal of Portfolio
   Management*, 36(4).
 - Markowitz, H. (1952). Portfolio Selection. *The Journal of Finance*, 7(1).
+- Politis, D. & Romano, J. (1992). A Circular Block-Resampling Procedure
+  for Stationary Data. *Exploring the Limits of Bootstrap*.
 - Beckman, Q. (2025). From Research to Real Trading: The RKDG Framework.
   *QuantlabsNet Blog*.
