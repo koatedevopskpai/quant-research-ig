@@ -73,6 +73,7 @@ from agentic_finance.research_agent import ResearchAgent, ResearchRequest
 from agentic_finance.execution_agent import ExecutionAgent, Signal
 from agentic_finance.risk_manager import RiskManager
 from agentic_finance.portfolio_agent import PortfolioAgent
+from agentic_finance.dashboard import Dashboard
 
 # ── Config ──────────────────────────────────────────────────────────
 EPICS = [
@@ -236,115 +237,104 @@ class ProductionRunner:
                          metrics.current_drawdown * 100,
                          metrics.n_positions)
 
-    def _print_status(self, l1) -> None:
-        """Print a one-line market status update."""
-        if l1:
-            spread_bps = (l1.spread / l1.mid_price * 10000) if l1.mid_price > 0 else 0
-            logger.info("L1 %s — bid=%.2f ask=%.2f spread=%.1fbps mid=%.2f",
-                         EPICS[0], l1.bid_price, l1.ask_price,
-                         spread_bps, l1.mid_price)
+    def _tick_loop(self) -> None:
+        """Background periodic tasks: research, risk check, PnL."""
+        l1 = None
+        try:
+            l1 = self.order_book.l1_snapshot()
+        except ValueError:
+            pass
 
-    # ── Main loop ───────────────────────────────────────────────────
+        if l1 and l1.mid_price > 0:
+            self.risk_manager.record_pnl((l1.mid_price - 100.0) * 10)
+
+        now = time.time()
+        if now - self._last_research_time > RESEARCH_INTERVAL:
+            try:
+                self._run_research()
+            except Exception as e:
+                logger.warning("Research task failed: %s", e)
+            self._last_research_time = now
+
+        if now - self._last_risk_check_time > RISK_CHECK_INTERVAL:
+            try:
+                self._check_risk()
+            except Exception as e:
+                logger.warning("Risk check failed: %s", e)
+            self._last_risk_check_time = now
 
     def run(self) -> None:
         self.setup()
         self._running = True
 
-        # Connect to market data (IG or simulated)
         self.tick_consumer.connect()
 
-        # If IGStreamer unavailable, connect MarketSimulator
+        dashboard = Dashboard(
+            order_book=self.order_book,
+            microstructure=self.microstructure,
+            toxicity=self.toxicity,
+            execution_agent=self.execution_agent,
+            risk_manager=self.risk_manager,
+            portfolio_agent=self.portfolio_agent,
+            audit_trail=self.audit_trail,
+            epics=EPICS,
+            refresh_sec=1.0,
+            on_refresh=self._tick_loop,
+        )
+
+        # If IGStreamer unavailable, use MarketSimulator
         if self.tick_consumer._streamer is None:
-            logger.info("Falling back to MarketSimulator (synthetic data)")
-            self._run_with_simulator()
+            from hft_engine.market_sim.generator import MarketSimulator
+            sim = MarketSimulator(
+                initial_price=100.0, volatility=0.02,
+                l1_freq_hz=10.0, trade_freq_hz=1.0,
+                depth_levels=10, seed=42,
+            )
+            self.tick_consumer.connect_market_simulator(sim)
+            logger.info("Running with MarketSimulator + Dashboard")
+            self._sim_feed(sim, dashboard)
             return
 
-        logger.info("Entering main loop — connected to IG Lightstreamer")
+        logger.info("Running with IG Lightstreamer + Dashboard")
         signal.signal(signal.SIGINT, self._shutdown)
         signal.signal(signal.SIGTERM, self._shutdown)
-
-        while self._running:
-            now = time.time()
-
-            try:
-                l1 = self.order_book.l1_snapshot()
-                self._print_status(l1)
-            except ValueError:
-                l1 = None
-
-            if now - self._last_research_time > RESEARCH_INTERVAL:
-                self._run_research()
-                self._last_research_time = now
-
-            if now - self._last_risk_check_time > RISK_CHECK_INTERVAL:
-                self._check_risk()
-                self._last_risk_check_time = now
-
-            if l1 and l1.mid_price > 0:
-                self.risk_manager.record_pnl(
-                    (l1.mid_price - 100.0) * 10
-                )
-            try:
-                time.sleep(1.0)
-            except KeyboardInterrupt:
-                self._shutdown(None, None)
+        dashboard.run()
 
         self._cleanup()
 
-    def _run_with_simulator(self) -> None:
-        """Fallback: run pipeline with MarketSimulator synthetic data."""
-        from hft_engine.market_sim.generator import MarketSimulator
+    def _sim_feed(
+        self, sim: Any, dashboard: Dashboard
+    ) -> None:
+        """Feed synthetic ticks from MarketSimulator while dashboard runs."""
+        import threading
 
-        sim = MarketSimulator(
-            initial_price=100.0, volatility=0.02,
-            l1_freq_hz=10.0, trade_freq_hz=1.0,
-            depth_levels=10, seed=42,
-        )
-        self.tick_consumer.connect_market_simulator(sim)
+        def feed():
+            while self._running:
+                ticks = sim.generate_ticks(3.0)
+                for tick in ticks:
+                    if not self._running:
+                        return
+                    msg = MarketDataMessage(
+                        epic=EPICS[0],
+                        message_type=tick.tick_type,
+                        bid_price=tick.bid_price,
+                        ask_price=tick.ask_price,
+                        bid_size=tick.bid_size,
+                        ask_size=tick.ask_size,
+                        last_price=tick.last_price,
+                        last_size=tick.last_size,
+                        timestamp_ns=int(tick.timestamp * 1e9),
+                    )
+                    self._on_market_data(msg)
+                import time
+                time.sleep(0.05)
 
-        logger.info("Running with MarketSimulator (Ctrl+C to stop)")
+        t = threading.Thread(target=feed, daemon=True)
+        t.start()
+
         signal.signal(signal.SIGINT, self._shutdown)
         signal.signal(signal.SIGTERM, self._shutdown)
-
-        while self._running:
-            ticks = sim.generate_ticks(5.0)
-            for tick in ticks:
-                msg = MarketDataMessage(
-                    epic=EPICS[0],
-                    message_type=tick.tick_type,
-                    bid_price=tick.bid_price,
-                    ask_price=tick.ask_price,
-                    bid_size=tick.bid_size,
-                    ask_size=tick.ask_size,
-                    last_price=tick.last_price,
-                    last_size=tick.last_size,
-                    timestamp_ns=int(tick.timestamp * 1e9),
-                )
-                self._on_market_data(msg)
-
-            try:
-                l1 = self.order_book.l1_snapshot()
-                self._print_status(l1)
-            except ValueError:
-                l1 = None
-
-            now = time.time()
-            if now - self._last_research_time > RESEARCH_INTERVAL:
-                self._run_research()
-                self._last_research_time = now
-            if now - self._last_risk_check_time > RISK_CHECK_INTERVAL:
-                self._check_risk()
-                self._last_risk_check_time = now
-
-            if l1 and l1.mid_price > 0:
-                self.risk_manager.record_pnl(
-                    (l1.mid_price - 100.0) * 10
-                )
-            try:
-                time.sleep(0.1)
-            except KeyboardInterrupt:
-                self._shutdown(None, None)
-
+        dashboard.run()
         self._cleanup()
 
     def _shutdown(self, sig, frame) -> None:
