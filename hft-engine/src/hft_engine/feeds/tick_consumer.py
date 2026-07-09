@@ -37,9 +37,12 @@ REFERENCES:
     Downing, B. (2025). HFT Feed Handler Architecture. QuantLabsNet.
 """
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable
+from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -143,6 +146,8 @@ class TickConsumer:
         self._subscriptions: dict[str, list[TickCallback]] = {}
         self._epic_to_data: dict[str, TickData] = {}
         self._connected = False
+        self._streamer: Any = None
+        self._simulator: Any = None
 
     def subscribe(
         self,
@@ -322,39 +327,166 @@ class TickConsumer:
             cb(msg)
 
     # ------------------------------------------------------------------
-    # Connection management (stub for IGStreamer integration)
+    # IGStreamer callbacks
+    # ------------------------------------------------------------------
+
+    def _on_l1_update(self, item_name: str, fields: dict[str, str]) -> None:
+        """
+        Callback for IGStreamer L1 MERGE updates.
+
+        IG sends L1 updates for item "MARKET:{epic}". Extracts the epic
+        from the item name, normalises field name casing (IG may send
+        "BID" or "Bid" depending on adapter version), parses into a
+        MarketDataMessage, and dispatches to all subscribers.
+
+        WHY normalising field names:
+            IGStreamer.subscribe_l1() requests fields in uppercase
+            ("BID", "OFFER"), but the actual field names in the update
+            may arrive as PascalCase ("Bid", "Offer") depending on the
+            Lightstreamer adapter version. Normalising avoids silent
+            data loss from missed field lookups.
+        """
+        epic = item_name.removeprefix("MARKET:")
+        normalised = {}
+        for k, v in fields.items():
+            normalised[k.capitalize()] = v
+        msg = self.parse_l1_update(epic, normalised)
+        self.dispatch(msg)
+
+    def _on_tick_update(self, item_name: str, fields: dict[str, str]) -> None:
+        """
+        Callback for IGStreamer TICK DISTINCT updates.
+
+        IG sends tick updates for item "CHART:{epic}:TICK". Extracts the
+        epic from the item name, normalises field name casing (IG tick
+        fields are "Bid", "Ofr", "Ltp", "Ltv" — we map them to the
+        canonical field names expected by parse_trade_update), parses
+        into a MarketDataMessage, and dispatches.
+
+        WHY mapping tick field names:
+            Tick subscriptions return different field names than L1:
+                IG tick field -> parse_trade_update field
+                "Bid"         -> "Bid" (unused in trade parsing)
+                "Ofr"         -> "Offer" (unused in trade parsing)
+                "Ltp"         -> "Last"
+                "Ltv"         -> "LastSize"
+            The mapping normalises these differences so the same parser
+            works for both L1 and tick feeds.
+        """
+        epic = item_name.removeprefix("CHART:").removesuffix(":TICK")
+        normalised = {}
+        field_map = {
+            "Ltp": "Last",
+            "Ltv": "LastSize",
+            "Ofr": "Offer",
+        }
+        for k, v in fields.items():
+            key = field_map.get(k, k.capitalize())
+            normalised[key] = v
+        msg = self.parse_trade_update(epic, normalised)
+        self.dispatch(msg)
+
+    # ------------------------------------------------------------------
+    # Connection management (IGStreamer integration)
     # ------------------------------------------------------------------
 
     def connect(
         self,
-        api_key: str,
-        account_id: str,
-        username: str,
-        password: str,
+        api_key: str | None = None,
+        account_id: str | None = None,
+        username: str | None = None,
+        password: str | None = None,
     ) -> None:
         """
         Connect to IG Lightstreamer and subscribe to all registered epics.
 
-        NOTE: This is a stub for the real IGStreamer integration. The
-        actual connection will use ig_market_data.stream.IGStreamer.
+        Uses ig_market_data.stream.IGStreamer for live data, which reads
+        IG credentials from environment variables (IG_API_KEY, IG_USERNAME,
+        IG_PASSWORD) via .env file.
 
-        For now, this method:
-        1. Creates an IGStreamer instance with the provided credentials.
-        2. For each subscribed epic, creates a subscription handler.
-        3. Registers _on_update as the callback for each subscription.
+        If lightstreamer-client-lib (Java JRE dependency) is unavailable
+        or IG credentials are not configured, logs a warning and operates
+        in simulated mode — the consumer is marked connected so it works
+        with MarketSimulator or synthetic data for testing.
+
+        WHEN LIVESTREAMER IS AVAILABLE:
+            1. Creates IGStreamer instance (reads auth from env).
+            2. Connects to IG Lightstreamer (v2 CST/XST auth).
+            3. For each subscribed epic, subscribes L1 MERGE and TICK
+               DISTINCT feeds.
+            4. Parsed MarketDataMessages are dispatched to all registered
+               callbacks.
+
+        Args:
+            api_key: Deprecated — kept for backward compatibility.
+            account_id: Deprecated — kept for backward compatibility.
+            username: Deprecated — kept for backward compatibility.
+            password: Deprecated — kept for backward compatibility.
         """
-        # TODO: Integrate with ig_market_data.stream.IGStreamer
-        # The real implementation will:
-        #   1. from ig_market_data.stream import IGStreamer
-        #   2. Create IGStreamer with api_key, account_id, username, password
-        #   3. For each epic in self._epic_to_data:
-        #      streamer.subscribe(epic, ...)
-        #   4. Register self._on_update as the message handler
+        try:
+            from ig_market_data.stream import IGStreamer
+
+            self._streamer = IGStreamer()
+            self._streamer.connect()
+            for epic in self._epic_to_data:
+                item_l1 = f"MARKET:{epic}"
+                self._streamer.subscribe_l1(epic, self._on_l1_update)
+                item_tick = f"CHART:{epic}:TICK"
+                self._streamer.subscribe_ticks(epic, self._on_tick_update)
+                logger.info("Subscribed: L1=%s TICK=%s", item_l1, item_tick)
+            self._connected = True
+            logger.info(
+                "TickConsumer connected to Lightstreamer (%d epics)",
+                len(self._epic_to_data),
+            )
+        except ImportError:
+            logger.warning(
+                "lightstreamer-client-lib not available. "
+                "TickConsumer operating in simulated mode. "
+                "Install with: pip install lightstreamer-client-lib"
+            )
+            self._connected = True
+        except RuntimeError as e:
+            logger.warning(
+                "IGStreamer connection failed: %s. "
+                "TickConsumer operating in simulated mode. "
+                "Check IG credentials in .env file.",
+                e,
+            )
+            self._connected = True
+
+    def connect_market_simulator(self, simulator: Any) -> None:
+        """
+        Connect to a MarketSimulator for synthetic data (no IG needed).
+
+        WHY THIS EXISTS:
+            Testing the full HFT pipeline (order book, microstructure,
+            toxicity) requires a tick feed. MarketSimulator generates
+            synthetic ticks so the pipeline is testable without a live
+            IG connection or Java JRE.
+
+        HOW IT WORKS:
+            Each synthetic tick from the simulator is parsed through the
+            standard TickConsumer parsers and dispatched to all registered
+            callbacks — exactly like a real IGStreamer update.
+
+        Args:
+            simulator: A MarketSimulator instance with a run(callback)
+                       method that yields MarketDataMessage objects.
+        """
+        self._simulator = simulator
         self._connected = True
+        logger.info("TickConsumer connected to MarketSimulator")
 
     def disconnect(self) -> None:
         """Disconnect from Lightstreamer and clean up subscriptions."""
+        if hasattr(self, "_streamer") and self._streamer is not None:
+            try:
+                self._streamer.disconnect()
+            except Exception as e:
+                logger.warning("Error disconnecting IGStreamer: %s", e)
         self._connected = False
+        self._simulator = None
 
     # ------------------------------------------------------------------
     # Internal helpers

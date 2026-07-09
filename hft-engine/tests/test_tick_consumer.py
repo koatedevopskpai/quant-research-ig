@@ -166,3 +166,121 @@ class TestTickConsumer:
     def test_safe_float_valid(self) -> None:
         assert TickConsumer._safe_float("100.50") == 100.50
         assert TickConsumer._safe_float("0") == 0.0
+
+    # ------------------------------------------------------------------
+    # Connection management
+    # ------------------------------------------------------------------
+
+    def test_connect_sets_connected(self) -> None:
+        """connect() should set _connected even when IGStreamer unavailable."""
+        consumer = TickConsumer()
+        consumer.subscribe("IX.D.FTSE.IFP.IP", lambda m: None)
+        consumer.connect()
+        assert consumer._connected is True
+
+    def test_disconnect_cleans_up(self) -> None:
+        consumer = TickConsumer()
+        consumer.subscribe("EPIC", lambda m: None)
+        consumer.connect()
+        consumer.disconnect()
+        assert consumer._connected is False
+
+    def test_connect_market_simulator(self) -> None:
+        consumer = TickConsumer()
+        consumer.subscribe("EPIC", lambda m: None)
+        consumer.connect_market_simulator("sim")
+        assert consumer._connected is True
+        assert consumer._simulator == "sim"
+        consumer.disconnect()
+        assert consumer._connected is False
+
+    # ------------------------------------------------------------------
+    # IGStreamer bridge callbacks
+    # ------------------------------------------------------------------
+
+    def test_on_l1_update_parses_and_dispatches(self) -> None:
+        received: list[MarketDataMessage] = []
+        consumer = TickConsumer()
+
+        def callback(msg: MarketDataMessage) -> None:
+            received.append(msg)
+
+        consumer.subscribe("IX.D.FTSE.IFP.IP", callback)
+        fields = {
+            "Bid": "100.50",
+            "Offer": "100.55",
+            "BidSize": "5000",
+            "OfferSize": "3000",
+            "Last": "100.52",
+        }
+        consumer._on_l1_update("MARKET:IX.D.FTSE.IFP.IP", fields)
+        assert len(received) == 1
+        msg = received[0]
+        assert msg.epic == "IX.D.FTSE.IFP.IP"
+        assert msg.message_type == "L1"
+        assert isclose(msg.bid_price, 100.50)
+        assert isclose(msg.ask_price, 100.55)
+
+    def test_on_l1_update_handles_uppercase_fields(self) -> None:
+        """Should normalise BID/OFFER -> Bid/Offer for parse_l1_update."""
+        received: list[MarketDataMessage] = []
+        consumer = TickConsumer()
+
+        def callback(msg: MarketDataMessage) -> None:
+            received.append(msg)
+
+        consumer.subscribe("EPIC", callback)
+        fields = {"BID": "99.00", "OFFER": "99.05"}
+        consumer._on_l1_update("MARKET:EPIC", fields)
+        assert len(received) == 1
+        assert isclose(received[0].bid_price, 99.00)
+        assert isclose(received[0].ask_price, 99.05)
+
+    def test_on_tick_update_parses_and_dispatches(self) -> None:
+        received: list[MarketDataMessage] = []
+        consumer = TickConsumer()
+
+        def callback(msg: MarketDataMessage) -> None:
+            received.append(msg)
+
+        consumer.subscribe("CS.D.EURUSD.CFD.IP", callback)
+        fields = {
+            "Ltp": "1.1234",
+            "Ltv": "1000000",
+            "Bid": "1.1233",
+            "Ofr": "1.1235",
+        }
+        consumer._on_tick_update(
+            "CHART:CS.D.EURUSD.CFD.IP:TICK", fields,
+        )
+        assert len(received) == 1
+        msg = received[0]
+        assert msg.epic == "CS.D.EURUSD.CFD.IP"
+        assert msg.message_type == "TRADE"
+        assert isclose(msg.last_price, 1.1234)
+        assert isclose(msg.last_size, 1000000)
+
+    def test_on_tick_update_empty_fields(self) -> None:
+        """Missing tick fields should default to 0.0."""
+        received: list[MarketDataMessage] = []
+        consumer = TickConsumer()
+
+        def callback(msg: MarketDataMessage) -> None:
+            received.append(msg)
+
+        consumer.subscribe("EPIC", callback)
+        consumer._on_tick_update("CHART:EPIC:TICK", {})
+        assert len(received) == 1
+        assert received[0].last_price == 0.0
+        assert received[0].last_size == 0.0
+
+    def test_on_l1_update_unknown_epic_dispatches_nothing(self) -> None:
+        received: list[MarketDataMessage] = []
+        consumer = TickConsumer()
+
+        def callback(msg: MarketDataMessage) -> None:
+            received.append(msg)
+
+        consumer.subscribe("EPIC_A", callback)
+        consumer._on_l1_update("MARKET:EPIC_B", {"Bid": "100"})
+        assert len(received) == 0

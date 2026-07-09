@@ -14,6 +14,7 @@ dependencies = [
     "ig-market-data",
     "quant-methods",
     "ml-for-finance",
+    "hft-engine",
 ]
 
 [project.optional-dependencies]
