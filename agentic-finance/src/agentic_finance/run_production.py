@@ -116,6 +116,9 @@ class ProductionRunner:
             total_capital=INITIAL_CAPITAL,
         )
 
+        # Epics
+        self.epics = list(EPICS)
+
         # Timing state
         self._last_research_time: float = 0.0
         self._last_risk_check_time: float = 0.0

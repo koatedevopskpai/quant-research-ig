@@ -149,3 +149,114 @@ class TestMicrostructureAnalyser:
         result = MicrostructureAnalyser.classify_trade(100.50, 1000, book)
         assert result.side == "neutral"
         assert result.confidence == 0.0
+
+
+class TestMicrostructurePurePython:
+    """
+    Tests running exclusively through the pure-Python MicrostructureAnalyser path.
+    These verify the Python fallback works when C++ is disabled.
+    """
+
+    @pytest.fixture
+    def analyser(self) -> MicrostructureAnalyser:
+        return MicrostructureAnalyser(window_size=50, use_cpp=False)
+
+    def _make_l1(self, bid: float = 100.0, ask: float = 101.0,
+                 bid_size: float = 5000, ask_size: float = 3000) -> MarketDataMessage:
+        return MarketDataMessage(
+            epic="TEST", message_type="L1",
+            bid_price=bid, ask_price=ask,
+            bid_size=bid_size, ask_size=ask_size,
+        )
+
+    def test_spread_stats_empty(self, analyser: MicrostructureAnalyser) -> None:
+        stats = analyser.spread_stats()
+        assert stats.count == 0
+
+    def test_spread_stats_single(self, analyser: MicrostructureAnalyser) -> None:
+        analyser.on_tick(self._make_l1(bid=100.0, ask=101.0))
+        stats = analyser.spread_stats()
+        assert stats.count == 1
+        assert stats.mean == 1.0
+
+    def test_spread_stats_multiple(self, analyser: MicrostructureAnalyser) -> None:
+        for i in range(5):
+            analyser.on_tick(self._make_l1(bid=100.0, ask=101.0 + i * 0.1))
+        stats = analyser.spread_stats()
+        assert stats.count == 5
+        assert stats.mean > 1.0
+
+    def test_spread_stats_window(self, analyser: MicrostructureAnalyser) -> None:
+        for i in range(100):
+            analyser.on_tick(self._make_l1(bid=100.0, ask=101.0))
+        stats = analyser.spread_stats()
+        assert stats.count == 50
+
+    def test_ignores_non_l1(self, analyser: MicrostructureAnalyser) -> None:
+        msg = MarketDataMessage(
+            epic="TEST", message_type="TRADE",
+            last_price=100.5, last_size=1000,
+        )
+        analyser.on_tick(msg)
+        assert analyser.spread_stats().count == 0
+
+    def test_current_depth(self) -> None:
+        book = OrderBook(use_cpp=False)
+        book.apply_diff("bid", 100.50, 5000)
+        book.apply_diff("ask", 101.00, 3000)
+        profile = MicrostructureAnalyser.current_depth(book)
+        assert profile.total_bid_volume == 5000
+        assert profile.total_ask_volume == 3000
+        assert profile.imbalance > 0
+
+    def test_current_depth_empty_book(self) -> None:
+        book = OrderBook(use_cpp=False)
+        profile = MicrostructureAnalyser.current_depth(book)
+        assert profile.total_bid_volume == 0
+        assert profile.total_ask_volume == 0
+
+    def test_classify_buy(self) -> None:
+        book = OrderBook(use_cpp=False)
+        book.apply_diff("bid", 100.50, 5000)
+        book.apply_diff("ask", 101.00, 3000)
+        result = MicrostructureAnalyser.classify_trade(101.00, 1000, book)
+        assert result.side == "buy"
+        assert result.confidence == 1.0
+
+    def test_classify_sell(self) -> None:
+        book = OrderBook(use_cpp=False)
+        book.apply_diff("bid", 100.50, 5000)
+        book.apply_diff("ask", 101.00, 3000)
+        result = MicrostructureAnalyser.classify_trade(100.50, 1000, book)
+        assert result.side == "sell"
+        assert result.confidence == 1.0
+
+    def test_classify_inside_spread_above_mid(self) -> None:
+        book = OrderBook(use_cpp=False)
+        book.apply_diff("bid", 100.50, 5000)
+        book.apply_diff("ask", 101.00, 3000)
+        result = MicrostructureAnalyser.classify_trade(100.80, 1000, book)
+        assert result.side == "buy"
+        assert result.confidence == 0.5
+
+    def test_classify_inside_spread_below_mid(self) -> None:
+        book = OrderBook(use_cpp=False)
+        book.apply_diff("bid", 100.50, 5000)
+        book.apply_diff("ask", 101.00, 3000)
+        result = MicrostructureAnalyser.classify_trade(100.70, 1000, book)
+        assert result.side == "sell"
+        assert result.confidence == 0.5
+
+    def test_classify_empty_book(self) -> None:
+        book = OrderBook(use_cpp=False)
+        result = MicrostructureAnalyser.classify_trade(100.0, 1000, book)
+        assert result.side == "neutral"
+        assert result.confidence == 0.0
+
+    def test_classify_above_ask_is_buy(self) -> None:
+        book = OrderBook(use_cpp=False)
+        book.apply_diff("bid", 100.50, 5000)
+        book.apply_diff("ask", 101.00, 3000)
+        result = MicrostructureAnalyser.classify_trade(101.50, 1000, book)
+        assert result.side == "buy"
+        assert result.confidence == 0.8

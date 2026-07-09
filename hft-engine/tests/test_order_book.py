@@ -193,3 +193,87 @@ class TestOrderBook:
         l2 = populated_book.l2_snapshot(max_levels=2)
         assert len(l2.bids) == 2
         assert len(l2.asks) == 2
+
+
+class TestOrderBookPurePython:
+    """
+    Tests running exclusively through the pure-Python OrderBook path.
+    These verify the Python fallback works when C++ is disabled.
+    """
+
+    @pytest.fixture
+    def book(self) -> OrderBook:
+        return OrderBook(use_cpp=False)
+
+    def test_apply_diff_and_l1(self, book: OrderBook) -> None:
+        book.apply_diff("bid", 100.50, 5000)
+        book.apply_diff("ask", 101.00, 3000)
+        l1 = book.l1_snapshot()
+        assert l1.bid_price == 100.50
+        assert l1.ask_price == 101.00
+
+    def test_apply_diff_update_bid(self, book: OrderBook) -> None:
+        book.apply_diff("bid", 100.50, 5000)
+        book.apply_diff("ask", 101.00, 3000)
+        book.apply_diff("bid", 100.50, 6000)
+        l1 = book.l1_snapshot()
+        assert l1.bid_size == 6000
+
+    def test_apply_diff_delete(self, book: OrderBook) -> None:
+        book.apply_diff("bid", 100.50, 5000)
+        book.apply_diff("ask", 101.00, 3000)
+        book.apply_diff("bid", 100.50, 0)
+        with pytest.raises(ValueError):
+            book.l1_snapshot()
+
+    def test_apply_diff_insert_mid(self, book: OrderBook) -> None:
+        book.apply_diff("bid", 100.50, 5000)
+        book.apply_diff("bid", 100.30, 3000)
+        book.apply_diff("bid", 100.40, 4000)
+        l2 = book.l2_snapshot()
+        assert len(l2.bids) == 3
+        assert l2.bids[1].price == 100.40
+
+    def test_apply_diff_insert_ask_mid(self, book: OrderBook) -> None:
+        book.apply_diff("ask", 101.00, 3000)
+        book.apply_diff("ask", 101.20, 4000)
+        book.apply_diff("ask", 101.10, 5000)
+        l2 = book.l2_snapshot()
+        assert len(l2.asks) == 3
+        assert l2.asks[1].price == 101.10
+
+    def test_apply_snapshot(self, book: OrderBook) -> None:
+        book.apply_snapshot(
+            bids=[PriceLevel(100.50, 5000), PriceLevel(100.25, 3000)],
+            asks=[PriceLevel(101.00, 4000)],
+        )
+        l1 = book.l1_snapshot()
+        assert l1.bid_price == 100.50
+        assert l1.ask_price == 101.00
+
+    def test_l2_snapshot_max_levels(self, book: OrderBook) -> None:
+        book.apply_diff("bid", 100.50, 5000)
+        book.apply_diff("bid", 100.25, 3000)
+        book.apply_diff("ask", 101.00, 4000)
+        book.apply_diff("ask", 101.50, 2000)
+        l2 = book.l2_snapshot(max_levels=1)
+        assert len(l2.bids) == 1
+        assert len(l2.asks) == 1
+
+    def test_depth_summary(self, book: OrderBook) -> None:
+        book.apply_diff("bid", 100.50, 5000)
+        book.apply_diff("bid", 100.25, 3000)
+        book.apply_diff("ask", 101.00, 4000)
+        depth = book.depth_summary()
+        assert depth.bid_volume == 8000
+        assert depth.ask_volume == 4000
+
+    def test_auto_detect_cpp(self) -> None:
+        """When hft_cpp is available, OrderBook() auto-selects C++."""
+        try:
+            import hft_engine.hft_cpp
+            book = OrderBook()  # no use_cpp arg
+            assert book._use_cpp is True
+        except ImportError:
+            book = OrderBook()
+            assert book._use_cpp is False

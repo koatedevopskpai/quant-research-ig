@@ -44,6 +44,10 @@ class TestResearchAgent:
     def agent(self, message_bus, audit_trail):
         return ResearchAgent(message_bus, audit_trail, llm_api_key=None)
 
+    @pytest.fixture
+    def agent_with_key(self, message_bus, audit_trail):
+        return ResearchAgent(message_bus, audit_trail, llm_api_key="sk-invalid-test-key")
+
     def test_register_model(self, agent):
         model = MockModel()
         agent.register_model("regime", model)
@@ -126,3 +130,45 @@ class TestResearchAgent:
         request = ResearchRequest(epic="EPIC", model_type="regime")
         result = agent.research(request, MockPrices())
         assert "error" in result.model_output
+
+    def test_lstm_not_registered(self, agent):
+        request = ResearchRequest(epic="EPIC", model_type="lstm")
+        result = agent.research(request, MockPrices())
+        assert "error" in result.model_output
+
+    def test_sentiment_not_registered(self, agent):
+        request = ResearchRequest(epic="EPIC", model_type="sentiment")
+        result = agent.research(request, MockPrices())
+        assert "error" in result.model_output
+
+    def test_forecast_not_registered(self, agent):
+        request = ResearchRequest(epic="EPIC", model_type="forecast")
+        result = agent.research(request, MockPrices())
+        assert "error" in result.model_output
+
+    def test_llm_report_returns_fallback_on_no_key(self, agent):
+        """When llm_api_key is None, _llm_report returns error message."""
+        request = ResearchRequest(epic="EPIC", model_type="regime")
+        output = {"key": "value"}
+        report = agent._llm_report(request, output)
+        assert "LLM report unavailable" in report
+
+    def test_llm_report_with_bad_key_returns_error_message(self, agent_with_key):
+        """With an invalid API key, _llm_report returns an error message."""
+        request = ResearchRequest(epic="EPIC", model_type="regime")
+        output = {"key": "value"}
+        report = agent_with_key._llm_report(request, output)
+        assert "[LLM report unavailable:" in report
+
+    def test_regime_model_none_returns_error(self, agent):
+        """_run_regime with no registered model returns error dict."""
+        result = agent._run_regime(MockPrices())
+        assert "error" in result
+
+    def test_lstm_model_none_returns_error(self, agent):
+        result = agent._run_lstm(MockPrices())
+        assert "error" in result
+
+    def test_sentiment_model_none_returns_error(self, agent):
+        result = agent._run_sentiment(MockPrices(), None)
+        assert "error" in result

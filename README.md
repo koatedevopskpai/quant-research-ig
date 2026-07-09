@@ -1,8 +1,15 @@
 # IG Market Data Project — Systematic Quant Trading Platform
 
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org)
+[![Python](https://img.shields.io/badge/python-3.14-blue)](https://www.python.org)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Status](https://img.shields.io/badge/status-alpha-yellow)]()
+[![Tests](https://img.shields.io/badge/tests-317%20passed-brightgreen)]()
+
+<div>
+<img src=".github/badges/coverage-total.svg" alt="Total coverage">
+<img src=".github/badges/coverage-agentic-finance.svg" alt="Agentic-finance coverage">
+<img src=".github/badges/coverage-hft-engine.svg" alt="HFT engine coverage">
+</div>
 
 A full-stack systematic trading platform that ingests live market data from
 [IG Group's API](https://labs.ig.com), then builds upwards through classical
@@ -84,13 +91,15 @@ Analysis** (testing for parameter drift across regimes).
 
 ## Current Status
 
-| Module | Phase | Status |
-|--------|-------|--------|
-| `market-data` | Phase 1 | IG API authenticated, categories discovered, price history working, streaming live |
-| `quant-methods` | Phase 2a | Black-Scholes + Greeks implemented (11 tests). Binomial/MC/GARCH planned |
-| `hft-engine` | Phase 2b | Skeleton — order book C++ core planned |
-| `ml-for-finance` | Phase 3a | Skeleton — HMM regime detection planned |
-| `agentic-finance` | Phase 5 | Skeleton — agent architecture planned |
+| Module | Phase | Status | Tests |
+|--------|-------|--------|-------|
+| `market-data` | Phase 1 | IG API authenticated, streaming live, L1+L2 subscriptions | — |
+| `quant-methods` | Phase 2a | Black-Scholes, Greeks, Monte Carlo, GARCH, portfolio optimisation | — |
+| `hft-engine` | Phase 2b | Order book (C++ pybind11), microstructure analyser, toxicity detector, execution sim, colocation sim, latency monitor, market sim feed | **150 / 95%** |
+| `ml-for-finance` | Phase 3a | HMM regimes, XGBoost forecasting, LSTM, sentiment models | — |
+| `agentic-finance` | Phase 5 | Research, execution, risk, portfolio agents; LLM research reports; MessageBus; AuditTrail; FastAPI REST + WebSocket API; Streamlit dashboard; terminal dashboard (rich) | **167 / 88%** |
+
+> **Coverage**: 317 tests total, 91% combined. Badges regenerate via `.github/badges/generate_badges.py`.
 
 ## Quick Start
 
@@ -103,14 +112,15 @@ cd quant-research-ig
 cp .env.template .env
 # Edit .env with your IG API credentials (obtain from labs.ig.com)
 
-# 3. Install a sub-module (e.g., market-data)
-pip install -e market-data/
+# 3. Install sub-modules
+pip install -e agentic-finance/
+pip install -e hft-engine/
 
-# 4. Verify IG API connection
-python -m ig_market_data.verify_ig
+# 4. Run all tests
+pytest agentic-finance/tests/ hft-engine/tests/
 
-# 5. Run tests
-pytest market-data/tests/
+# 5. Regenerate coverage badges
+python .github/badges/generate_badges.py
 ```
 
 ## Implementation Roadmap

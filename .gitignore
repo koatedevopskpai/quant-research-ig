@@ -81,6 +81,7 @@ htmlcov/
 *.cover
 coverage/
 coverage.xml
+coverage.json
 
 # =============================================================================
 # Logs & Data

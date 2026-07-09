@@ -69,3 +69,56 @@ class TestExecutionSimulator:
         fills = sim.fill_from_book("sell", 2500, book_bids, book_asks, 0.0)
         assert len(fills) == 2
         assert sum(f.size for f in fills) == 2500
+
+    def test_simulate_with_book_levels(self):
+        sim = ExecutionSimulator()
+        book_asks = [(101.0, 1000), (102.0, 2000)]
+        r = sim.simulate(1500, "buy", 100.0, book_levels=book_asks)
+        assert isinstance(r, ImpactResult)
+        assert r.total_cost_bps > 0
+        assert r.shares_executed > 0
+
+    def test_simulate_with_book_levels_sell(self):
+        sim = ExecutionSimulator()
+        book_bids = [(99.0, 1000), (98.0, 2000)]
+        r = sim.simulate(1500, "sell", 100.0, book_levels=book_bids)
+        assert isinstance(r, ImpactResult)
+        assert r.execution_price < 100.0
+
+    def test_simulate_with_book_larger_than_order(self):
+        """When book has enough volume, all shares are filled."""
+        sim = ExecutionSimulator()
+        book_asks = [(101.0, 10000)]
+        r = sim.simulate(500, "buy", 100.0, book_levels=book_asks)
+        assert r.shares_executed == 500
+
+    def test_simulate_with_book_smaller_than_order(self):
+        """When book has insufficient volume, partial fill occurs."""
+        sim = ExecutionSimulator()
+        book_asks = [(101.0, 100)]
+        r = sim.simulate(1000, "buy", 100.0, book_levels=book_asks)
+        assert r.shares_executed <= 1000
+
+    def test_slice_order_zero_slices(self):
+        sim = ExecutionSimulator()
+        slices = sim.slice_order(10000, 0)
+        assert slices == [10000.0]
+
+    def test_slice_order_negative_slices(self):
+        sim = ExecutionSimulator()
+        slices = sim.slice_order(10000, -1)
+        assert slices == [10000.0]
+
+    def test_fill_from_book_exact_volume(self):
+        sim = ExecutionSimulator()
+        book_asks = [(101.0, 1000), (102.0, 1000)]
+        fills = sim.fill_from_book("buy", 2000, [], book_asks, 0.0)
+        assert len(fills) == 2
+        assert sum(f.size for f in fills) == 2000
+
+    def test_fill_from_book_partial(self):
+        sim = ExecutionSimulator()
+        book_asks = [(101.0, 500)]
+        fills = sim.fill_from_book("buy", 1000, [], book_asks, 0.0)
+        assert len(fills) == 1
+        assert fills[0].size == 500
