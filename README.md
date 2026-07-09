@@ -58,6 +58,7 @@ critical.
   A C++ Breakdown" — *QuantLabsNet.com* (2025)
 - Downing, B. "Unlocking AI High Frequency Trading C++ and the Future of
   Quantitative Finance" — *QuantLabsNet.com* (2025)
+- [LinkedIn](https://www.linkedin.com/in/bryan-downing-165a1523)
 
 ### Quant Beckman — Quantitative Research & Statistical Validation
 
@@ -76,6 +77,7 @@ Analysis** (testing for parameter drift across regimes).
 **Key references:**
 - Beckman, Q. "Quantitative Research Foundations" (2025)
 - Beckman, Q. "Trading the Breaking" Substack — [quantbeckman.com](https://quantbeckman.com)
+- [LinkedIn](https://www.linkedin.com/in/quantbeckman)
 
 ## Architecture Highlights
 
