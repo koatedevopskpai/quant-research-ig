@@ -13,6 +13,7 @@ dependencies = [
     "scikit-learn>=1.5",
     "xgboost>=2.0",
     "torch>=2.3",
+    "hmmlearn>=0.3",
     "ig-market-data",
 ]
 
