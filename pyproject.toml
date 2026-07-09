@@ -1,0 +1,49 @@
+# =============================================================================
+# IG Market Data Project — Workspace Root Configuration
+# =============================================================================
+# This file defines the workspace-level tooling and project metadata.
+# Each sub-module has its own pyproject.toml for package-specific dependencies.
+# =============================================================================
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ig-market-data-project"
+version = "0.1.0"
+description = "Systematic quant trading platform: IG data ingestion, option pricing, HFT engine, ML signals, and autonomous agents"
+authors = [
+    { name = "Koate Kpai", email = "koate.kpai@example.com" },
+]
+requires-python = ">=3.10"
+
+[project.urls]
+Repository = "https://github.com/koate-kpai/quant-research-ig"
+Documentation = "https://github.com/koate-kpai/quant-research-ig/blob/main/README.md"
+
+# =============================================================================
+# Linting & Formatting (ruff)
+# =============================================================================
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+# =============================================================================
+# Testing (pytest)
+# =============================================================================
+[tool.pytest.ini_options]
+testpaths = [
+    "market-data/tests",
+    "quant-methods/tests",
+    "hft-engine/tests",
+    "ml-for-finance/tests",
+    "agentic-finance/tests",
+]
+addopts = "-v --tb=short"
