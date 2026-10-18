@@ -19,8 +19,8 @@ authors = [
 requires-python = ">=3.10"
 
 [project.urls]
-Repository = "https://github.com/koate-kpai/quant-research-ig"
-Documentation = "https://github.com/koate-kpai/quant-research-ig/blob/main/README.md"
+Repository = "https://github.com/koatedevopskpai/quant-research-ig"
+Documentation = "https://github.com/koatedevopskpai/quant-research-ig/blob/main/README.md"
 
 # =============================================================================
 # Linting & Formatting (ruff)

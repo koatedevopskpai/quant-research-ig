@@ -51,9 +51,9 @@ This spans **Phase 2b (Core)** and **Phase 3b (Advanced)** in the roadmap.
 | cpp/CMakeLists.txt | Build | CMake + pybind11 build config |
 
 ## Status
-- [x] Phase 2b Core — order book, feed handler, microstructure (45 tests)
-- [x] Phase 3b Python — toxicity, latency, execution, market sim, co-location (43 tests)
-- [x] **All 88 tests passing**
+- [x] Phase 2b Core — order book, feed handler, microstructure (unit checks)
+- [x] Phase 3b Python — toxicity, latency, execution, market sim, co-location (unit checks)
+- [x] **Unit checks are listed here; no current pass result is established by this phase note**
 - [ ] C++ pybind11 build (`pip install .[cpp]` — requires VS Build Tools + CMake)
 
 ---
