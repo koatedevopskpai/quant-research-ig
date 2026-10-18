@@ -56,9 +56,9 @@ Framework)** in the STRATEGY.md roadmap.
 | validation/wfa.py | `WalkForwardAnalysis` | Anchored/rolling walk-forward |
 
 ## Status
-- [x] Phase 2a — Black-Scholes, binomial tree, Monte Carlo, GARCH, portfolio (55 tests)
-- [x] Phase 4 — Backtester, Monkey Test, PSR, DSR, Bootstrap, CPCV, WFA (51 tests)
-- [x] **All 106 tests passing**
+- [x] Phase 2a — Black-Scholes, binomial tree, Monte Carlo, GARCH, portfolio (unit checks)
+- [x] Phase 4 — Backtester, Monkey Test, PSR, DSR, Bootstrap, CPCV, WFA (unit checks)
+- [x] **Unit checks are listed here; no current pass result is established by this phase note**
 
 ---
 

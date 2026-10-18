@@ -3,18 +3,16 @@
 [![Python](https://img.shields.io/badge/python-3.14-blue)](https://www.python.org)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Status](https://img.shields.io/badge/status-alpha-yellow)]()
-[![Tests](https://img.shields.io/badge/tests-317%20passed-brightgreen)]()
 
-<div>
-<img src=".github/badges/coverage-total.svg" alt="Total coverage">
-<img src=".github/badges/coverage-agentic-finance.svg" alt="Agentic-finance coverage">
-<img src=".github/badges/coverage-hft-engine.svg" alt="HFT engine coverage">
-</div>
+Historical saved coverage badge assets remain under `.github/badges/`; their values
+are not a fresh coverage measurement. See the claim-sweep evidence for attempted
+test commands and their exact results.
 
-A full-stack systematic trading platform that ingests live market data from
-[IG Group's API](https://labs.ig.com), then builds upwards through classical
-quant finance models, real-time order book reconstruction, ML-driven signal
-generation, and finally autonomous trading agents with LLM reasoning.
+A reference collection of IG market-data integration code, quantitative research,
+execution simulation, ML models and agent components. The current full-suite
+attempt fails during collection; no passing total or coverage is asserted by this
+wording sweep. See [verification and blockers](evidence/W5-07.md). No live market,
+provider or trading-execution run was performed for this review.
 
 Designed as a portfolio project demonstrating the quantitative researcher skill
 set: **data engineering, derivative pricing, statistical validation,
@@ -83,9 +81,9 @@ Analysis** (testing for parameter drift across regimes).
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| **Data storage** | PostgreSQL + BRIN indexes | SQL JOINs across instruments; BRIN gives ~95% of timeseries-DB perf on timestamps |
+| **Data storage** | PostgreSQL + BRIN indexes | SQL JOINs across instruments and indexing for timestamp queries; no throughput comparison established here |
 | **API auth** | IG API v3 OAuth 2.0 Bearer tokens | IG deprecated v2; simpler flow than CST/XST |
-| **Real-time streaming** | Lightstreamer push protocol | 10-50ms latency vs 1s+ polling; auto-reconnect built-in |
+| **Real-time streaming** | Lightstreamer push protocol | Push updates and reconnect support; no latency comparison reproduced here |
 | **Quant research** | Python-first (pandas, numpy, scipy) | Rapid iteration; vast financial computing ecosystem |
 | **Hot-path performance** | C++ via pybind11 | Order book + feed handler; lock-free structures in C++, orchestration in Python |
 | **Strategy validation** | Beckman's falsification gauntlet | PSR, DSR, CPCV, WFA — every strategy statistically gated |
@@ -95,19 +93,20 @@ Analysis** (testing for parameter drift across regimes).
 
 | Module | Phase | Status | Tests |
 |--------|-------|--------|-------|
-| `market-data` | Phase 1 | IG API authenticated, streaming live, L1+L2 subscriptions | — |
+| `market-data` | Phase 1 | IG API authentication and L1/L2 streaming integration code; no live run inspected in this sweep | — |
 | `quant-methods` | Phase 2a | Black-Scholes, Greeks, Monte Carlo, GARCH, portfolio optimisation | — |
-| `hft-engine` | Phase 2b | Order book (C++ pybind11), microstructure analyser, toxicity detector, execution sim, colocation sim, latency monitor, market sim feed | **150 / 95%** |
+| `hft-engine` | Phase 2b | Order book (C++ pybind11), microstructure analyser, toxicity detector, execution sim, colocation sim, latency monitor, market sim feed | Not reproduced in this sweep |
 | `ml-for-finance` | Phase 3a | HMM regimes, XGBoost forecasting, LSTM, sentiment models | — |
-| `agentic-finance` | Phase 5 | Research, execution, risk, portfolio agents; LLM research reports; MessageBus; AuditTrail; FastAPI REST + WebSocket API; Streamlit dashboard; terminal dashboard (rich) | **167 / 88%** |
+| `agentic-finance` | Phase 5 | Research, execution, risk, portfolio agents; LLM research reports; MessageBus; AuditTrail; FastAPI REST + WebSocket API; Streamlit dashboard; terminal dashboard (rich) | Not reproduced in this sweep |
 
-> **Coverage**: 317 tests total, 91% combined. Badges regenerate via `.github/badges/generate_badges.py`.
+> The old static test/coverage headline is removed. Re-run the documented suites
+> for the selected revision and platform; test counts and coverage are separate measures.
 
 ## Quick Start
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/koate-kpai/quant-research-ig.git
+git clone https://github.com/koatedevopskpai/quant-research-ig.git
 cd quant-research-ig
 
 # 2. Configure credentials

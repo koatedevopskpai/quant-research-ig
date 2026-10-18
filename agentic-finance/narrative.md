@@ -123,13 +123,13 @@ if toxic, signal is rejected and audit trail records the veto.
 | src/agentic_finance/execution_agent.py | ExecutionAgent, Order, Signal |
 | src/agentic_finance/risk_manager.py | RiskManager, RiskMetrics |
 | src/agentic_finance/portfolio_agent.py | PortfolioAgent, Allocation, PortfolioState |
-| tests/test_message_bus.py | 10 tests |
-| tests/test_decision.py | 4 tests |
-| tests/test_audit_trail.py | 11 tests |
-| tests/test_research_agent.py | 10 tests |
-| tests/test_execution_agent.py | 16 tests |
-| tests/test_risk_manager.py | 19 tests |
-| tests/test_portfolio_agent.py | 16 tests |
+| tests/test_message_bus.py | unit checks |
+| tests/test_decision.py | unit checks |
+| tests/test_audit_trail.py | unit checks |
+| tests/test_research_agent.py | unit checks |
+| tests/test_execution_agent.py | unit checks |
+| tests/test_risk_manager.py | unit checks |
+| tests/test_portfolio_agent.py | unit checks |
 
 ## Status
 - [x] Project skeleton with pyproject.toml, narrative.md
@@ -138,4 +138,4 @@ if toxic, signal is rejected and audit trail records the veto.
 - [x] Execution Agent with toxicity veto and position sizing
 - [x] Risk Manager with VaR, drawdown, daily loss limits
 - [x] Portfolio Agent with equal/risk-parity/mean-variance allocation
-- [x] All 93 tests passing
+- [x] Unit checks are listed here; no current pass result is established by this phase note
