@@ -104,16 +104,17 @@ class TestRiskManager:
         rm.check_risk()
         assert len(received) == 1
 
-    def test_kill_switch_publishes_kill(self, rm):
+    def test_kill_switch_publishes_halt_notification(self, rm):
         received = []
 
         def cb(msg):
             received.append(msg)
 
-        rm.message_bus.subscribe("risk.kill", cb)
+        rm.message_bus.subscribe("risk.halted", cb)
         rm.record_pnl(-20_000.0)
         rm.kill_if_needed()
         assert len(received) == 1
+        assert "drawdown" in received[0].payload["reason"]
 
     def test_daily_loss_limit_breach(self, rm):
         rm.record_pnl(-4000.0)

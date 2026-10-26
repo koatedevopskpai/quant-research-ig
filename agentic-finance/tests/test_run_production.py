@@ -26,6 +26,7 @@ def mock_pipeline():
     runner.portfolio_agent = MagicMock()
     runner.tick_consumer = MagicMock()
     runner.books[runner.epics[0]] = MagicMock()
+    runner.books[runner.epics[0]].l1_snapshot.return_value = MagicMock(mid_price=100.0)
     runner.analysers[runner.epics[0]] = MagicMock()
     runner.toxicity = MagicMock()
 
@@ -110,12 +111,15 @@ class TestTickLoop:
         mock_pipeline.books[mock_pipeline.epics[0]].l1_snapshot.side_effect = ValueError("empty")
         mock_pipeline._tick_loop()  # should not raise
 
-    def test_tick_loop_records_pnl(self, mock_pipeline):
+    def test_tick_loop_marks_prices_for_risk(self, mock_pipeline):
         mock_pipeline.books[mock_pipeline.epics[0]].l1_snapshot.return_value = MagicMock(
             mid_price=105.0,
         )
         mock_pipeline._tick_loop()
-        mock_pipeline.risk_manager.record_pnl.assert_called_once()
+        mock_pipeline.risk_manager.update_mark.assert_called()
+        args = mock_pipeline.risk_manager.update_mark.call_args[0]
+        assert args[0] == mock_pipeline.epics[0]
+        assert args[1] == pytest.approx(105.0)
 
     def test_tick_loop_runs_research(self, mock_pipeline):
         mock_pipeline.books[mock_pipeline.epics[0]].l1_snapshot.return_value = MagicMock(

@@ -92,6 +92,9 @@ class RiskMetricsResponse(BaseModel):
     n_positions: int
     is_breached: bool
     breaches: list[str]
+    equity: float = 0.0
+    exposure_pct: float = 0.0
+    is_halted: bool = False
 
 
 class AllocateRequest(BaseModel):
@@ -141,6 +144,19 @@ class AppState:
         self.execution = ExecutionAgent(self.bus, self.audit)
         self.risk = RiskManager(self.bus, self.audit)
         self.portfolio = PortfolioAgent(self.bus, self.audit)
+
+        # The API path must enforce the same controls as the runner: risk owns
+        # P&L/exposure from the ledger, and a halt stops execution here too.
+        self.risk.set_ledger(self.execution.ledger)
+        self.bus.subscribe("risk.halted", self._on_risk_halted)
+        self.bus.subscribe("risk.resumed", self._on_risk_resumed)
+
+    def _on_risk_halted(self, msg) -> None:
+        reason = msg.payload.get("reason", "risk halt") if msg.payload else "risk halt"
+        self.execution.halt(reason)
+
+    def _on_risk_resumed(self, msg) -> None:
+        self.execution.resume()
 
     def register_default_research_models(self) -> None:
         """
@@ -288,6 +304,11 @@ async def run_research(epic: str, body: ResearchRequestBody) -> ResearchResponse
 @app.post("/signal")
 async def post_signal(body: SignalRequest) -> OrderResponse | None:
     state = get_state()
+    # Enforcement point 2 (API): a halt must stop new risk here, not only in the
+    # runner. ExecutionAgent also refuses, but 409 makes the reason visible.
+    if (state.risk.is_halted or not state.execution.is_active
+            or not state.risk.can_trade()):
+        raise HTTPException(status_code=409, detail="Trading is halted")
     signal = Signal(
         epic=body.epic,
         direction=body.direction,
@@ -332,6 +353,9 @@ async def get_risk() -> RiskMetricsResponse:
         n_positions=metrics.n_positions,
         is_breached=metrics.is_breached,
         breaches=metrics.breaches,
+        equity=metrics.equity,
+        exposure_pct=metrics.exposure_pct,
+        is_halted=metrics.is_halted,
     )
 
 
@@ -348,13 +372,25 @@ async def check_risk() -> RiskMetricsResponse:
         n_positions=metrics.n_positions,
         is_breached=metrics.is_breached,
         breaches=metrics.breaches,
+        equity=metrics.equity,
+        exposure_pct=metrics.exposure_pct,
+        is_halted=metrics.is_halted,
     )
 
 
 @app.post("/risk/kill")
 async def kill_switch() -> dict[str, bool]:
-    killed = get_state().risk.kill_if_needed()
-    return {"killed": killed}
+    """Unconditional emergency halt — not conditional on an existing breach."""
+    state = get_state()
+    halted = state.risk.halt("manual emergency halt via API")
+    return {"halted": halted or state.risk.is_halted}
+
+
+@app.post("/risk/resume")
+async def resume_trading() -> dict[str, bool]:
+    state = get_state()
+    resumed = state.risk.resume()
+    return {"resumed": resumed or not state.risk.is_halted}
 
 
 # ── Portfolio endpoints ─────────────────────────────────────────────

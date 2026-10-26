@@ -53,10 +53,27 @@ class TestExecutionAgent:
         def cb(msg):
             received.append(msg)
 
-        agent.message_bus.subscribe("risk.kill", cb)
+        agent.message_bus.subscribe("execution.halted", cb)
         agent.kill()
         assert len(received) == 1
-        assert received[0].payload == {"active": False}
+        assert received[0].payload["reason"]
+
+    def test_halt_is_idempotent(self, agent):
+        received = []
+        agent.message_bus.subscribe("execution.halted", received.append)
+        assert agent.halt("first") is True
+        assert agent.halt("second") is False
+        assert len(received) == 1
+        assert agent.is_active is False
+
+    def test_resume_is_idempotent(self, agent):
+        received = []
+        agent.message_bus.subscribe("execution.resumed", received.append)
+        assert agent.resume() is False       # already active
+        agent.halt("stop")
+        assert agent.resume() is True
+        assert agent.resume() is False
+        assert len(received) == 1
 
     def test_kill_records_audit_trail(self, agent):
         agent.kill()
