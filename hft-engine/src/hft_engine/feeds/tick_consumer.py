@@ -109,6 +109,49 @@ class TickData:
     extractor: Callable[[str, dict], MarketDataMessage] | None = None
 
 
+# ---------------------------------------------------------------------------
+# Field normalisation
+# ---------------------------------------------------------------------------
+# WHY: IG's adapters emit a mix of cases and spellings for the same field —
+# "Ltp"/"LTP", "Ofr"/"OFFER", "Bid"/"BID". The old code lower-cased through
+# str.capitalize(), so "LTP" became "Ltp" and "OFR" became "Ofr", neither of
+# which the parsers read. A live replay of {'LTP': '105', 'LTV': '12'} produced
+# zero price and zero size. Mapping on the upper-cased, underscore-free key makes
+# every spelling land on one canonical name.
+_FIELD_ALIASES: dict[str, str] = {
+    "BID": "Bid",
+    "OFR": "Offer",
+    "OFFER": "Offer",
+    "BIDSIZE": "BidSize",
+    "OFFERSIZE": "OfferSize",
+    "LTP": "Last",
+    "LTV": "LastSize",
+    "LAST": "Last",
+    "LASTSIZE": "LastSize",
+    "HIGH": "High",
+    "LOW": "Low",
+    "MIDOPEN": "MidOpen",
+    "CHANGE": "Change",
+    "CHANGEPCT": "ChangePct",
+    "UPDATETIME": "UpdateTime",
+    "MARKETSTATE": "MarketState",
+    "UTM": "Utm",
+    "DAYOPENMID": "DayOpenMid",
+    "DAYHIGH": "DayHigh",
+    "DAYLOW": "DayLow",
+    "MARKETLEVEL": "MarketLevel",
+}
+
+
+def _canonical_fields(fields: dict[str, str]) -> dict[str, str]:
+    """Map provider field spellings onto the names the parsers expect."""
+    canonical: dict[str, str] = {}
+    for key, value in fields.items():
+        alias = _FIELD_ALIASES.get(key.upper().replace("_", ""))
+        canonical[alias if alias else key.capitalize()] = value
+    return canonical
+
+
 class TickConsumer:
     """
     Market data tick consumer that extends IG's Lightstreamer streaming.
@@ -347,10 +390,7 @@ class TickConsumer:
             data loss from missed field lookups.
         """
         epic = item_name.removeprefix("MARKET:")
-        normalised = {}
-        for k, v in fields.items():
-            normalised[k.capitalize()] = v
-        msg = self.parse_l1_update(epic, normalised)
+        msg = self.parse_l1_update(epic, _canonical_fields(fields))
         self.dispatch(msg)
 
     def _on_tick_update(self, item_name: str, fields: dict[str, str]) -> None:
@@ -374,16 +414,7 @@ class TickConsumer:
             works for both L1 and tick feeds.
         """
         epic = item_name.removeprefix("CHART:").removesuffix(":TICK")
-        normalised = {}
-        field_map = {
-            "Ltp": "Last",
-            "Ltv": "LastSize",
-            "Ofr": "Offer",
-        }
-        for k, v in fields.items():
-            key = field_map.get(k, k.capitalize())
-            normalised[key] = v
-        msg = self.parse_trade_update(epic, normalised)
+        msg = self.parse_trade_update(epic, _canonical_fields(fields))
         self.dispatch(msg)
 
     # ------------------------------------------------------------------

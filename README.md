@@ -23,7 +23,7 @@ is actually demonstrated versus merely intended.
 |---|---|---|---|
 | **1. Reproducible baseline** | supported interpreter, locked dependencies, credential-free install and collection, CI | **Complete** | [`docs/phase-1-baseline.md`](docs/phase-1-baseline.md) |
 | **2. Correct statistical validation** | PSR/DSR units and moments, look-ahead removal, model fitting inside purged CPCV / walk-forward folds | **Complete on this branch** ([PR #2](https://github.com/koatedevopskpai/quant-research-ig/pull/2)) | [`docs/phase-2-validation.md`](docs/phase-2-validation.md) |
-| **3. Market-data handling** | Lightstreamer callback and field mapping, L1 vs L2 semantics, per-instrument state isolation, opening prices, timestamps | Planned | — |
+| **3. Market-data handling** | Lightstreamer callback and field mapping, L1 vs L2 semantics, per-instrument state isolation, opening prices, timestamps | **In progress** — provider layer, replay and adapter fixes done; runner routing and ingestion outstanding | [`docs/phase-3-market-data.md`](docs/phase-3-market-data.md) |
 | **4. Research model contracts** | typed model input/output adapters, HMM/XGBoost registration, explicit regime → direction/confidence policy | Planned | — |
 | **5. Paper execution** | order IDs, lifecycle states, simulated fills, position ledger, reductions/exits/reversals/partials, stop and target handling | Planned | — |
 | **6. Risk controls** | P&L and exposure from the ledger, daily reset and capital updates, idempotent halt/resume, enforcement on every path | Planned | — |
@@ -65,16 +65,21 @@ MSVC 19.51 for the C++ job. No `.env`, IG session, database or LLM key.
 |---|---|
 | `uv run --locked python scripts/check_baseline.py` | all five distributions import |
 | `uv run --locked python scripts/check_validation.py` | published DSR reference `0.9003968344` |
-| `uv run --locked pytest` | **472 passed**, 24 skipped (C++ extension unbuilt) |
-| `uv run --locked pytest` after `build_cpp` | **496 passed**, 0 skipped |
+| `uv run --locked pytest` | **504 passed**, 24 skipped (C++ extension unbuilt) |
+| `uv run --locked pytest` after `build_cpp` | **528 passed**, 0 skipped |
 
 | Module | Tests |
 |---|---|
-| `market-data` | 26 |
+| `market-data` | 54 |
 | `quant-methods` | 128 |
-| `hft-engine` | 150 (24 need the compiled extension) |
+| `hft-engine` | 154 (24 need the compiled extension) |
 | `ml-for-finance` | 25 |
 | `agentic-finance` | 167 |
+
+Live read-only provider checks (see [`docs/phase-3-market-data.md`](docs/phase-3-market-data.md)):
+Binance `BTCUSDT` delivered 5,453 L2 events and 676 trades in 15 s; IG delivered
+63 ticks in 30 s with 401–548 ms provider timestamps before the account was
+suspended.
 
 Exact commands, failure modes and outstanding defects:
 [`evidence/R-03.md`](evidence/R-03.md). Remote CI has not been observed yet; the
@@ -116,13 +121,33 @@ Provider credentials are needed only for live integrations. Copy
 [labs.ig.com](https://labs.ig.com), and set `QUANT_LOAD_DOTENV=1` if you need
 `.env` discovery outside pytest. Every test runs offline.
 
+IG is not required for development or verification:
+
+```bash
+# Real L2 depth + trades, no account or key
+python scripts/provider_smoke.py binance --symbol BTCUSDT --seconds 20
+
+# Historical FX bid/ask ticks, no account
+python scripts/provider_smoke.py dukascopy --instrument EURUSD --date 2026-10-20 --hour 10
+```
+
+```python
+# Deterministic playback of a captured session (what CI uses)
+from ig_market_data.providers import ReplayProvider
+
+provider = ReplayProvider.from_jsonl("fixtures/session.jsonl")
+provider.connect()
+provider.subscribe("CS.D.EURUSD.CFD.IP", "l1", print)
+provider.replay()          # speed=10 to pace by provider time
+```
+
 ---
 
 ## Project structure
 
 ```
 quant-research-ig/
-├── market-data/          IG API client + Lightstreamer streaming + PostgreSQL storage
+├── market-data/          IG client, provider layer (IG / Dukascopy / Binance / replay), PostgreSQL
 ├── quant-methods/        Black-Scholes, trees, Monte Carlo, GARCH, portfolio opt., validation
 ├── hft-engine/           C++ order book (pybind11) + microstructure + execution simulation
 ├── ml-for-finance/       HMM regimes, XGBoost forecasting, LSTM, sentiment models
@@ -190,7 +215,7 @@ strategy has yet been promoted through them end to end (phase 8).
 |---|---|---|
 | **Data storage** | PostgreSQL + BRIN indexes | SQL JOINs across instruments; timestamp range indexing. No throughput comparison established here. |
 | **API auth** | IG API v3 OAuth 2.0 Bearer tokens | v3 returns `oauthToken.access_token` (1800 s TTL, refreshed at 1400 s). Lightstreamer still requires the legacy v2 CST/XST pair; `stream.py` documents this. |
-| **Real-time streaming** | Lightstreamer push protocol | L1/L2 subscriptions with reconnect support — **adapter defects outstanding** (phase 3). No latency measurement reproduced. |
+| **Real-time streaming** | Provider layer over Lightstreamer (IG), Binance WebSocket, Dukascopy files, and JSONL replay | Adapters and field mapping are fixed and test-covered; the IG transport is unverified while the account is suspended. IG has no depth feed — L2 comes from Binance. See [`docs/phase-3-market-data.md`](docs/phase-3-market-data.md). |
 | **Quant research** | Python-first (pandas, numpy, scipy) | Rapid iteration; broad financial computing ecosystem. |
 | **Hot-path performance** | C++ via pybind11 | Sorted-vector L2 book + tick parsers, single-threaded, called from Python. Measured on a 100-level book: `apply_diff` 0.9 µs vs 2.9 µs in Python (3.2×); `l1_snapshot` is **slower** in C++ (2.7 vs 1.4 µs) because the boundary dominates. See [`benchmarks/`](benchmarks/bench_order_book.py). |
 | **Strategy validation** | PSR, DSR, purged model CV, walk-forward refits | Tools implemented and reference-tested; automatic promotion gates are phase 8. |
@@ -215,10 +240,11 @@ strategy has yet been promoted through them end to end (phase 8).
 The defects below were reproduced in the 2026-10 review and are **not** fixed by
 phases 1–2. Each is assigned to the phase that will fix it.
 
-- **Streaming adapters** *(phase 3)* — the bridge implements `on_item_update`
-  while the SDK calls `onItemUpdate`; it enumerates attributes of `getValue`
-  rather than the update's fields; the tick subscription requests `LTP`/`LTV`
-  while the mapping expects `Ltp`/`Ltv`.
+- **Streaming adapters** *(phase 3, code fixed / live unverified)* — `onItemUpdate`
+  and `getFields()` are implemented and the tick-casing bug is fixed, but IG
+  delivery is unverified while the account is suspended. An IG L1 `MARKET:` item
+  delivered nothing even with the corrected callback and no subscription error;
+  cause unknown. See `docs/phase-3-market-data.md`.
 - **L1 vs L2** *(phase 3)* — successive top-of-book quotes are applied as
   incremental depth updates, so stale levels persist, and the live L1
   subscription supplies none of the sizes the book update assumes.
@@ -250,6 +276,7 @@ phases 1–2. Each is assigned to the phase that will fix it.
 |---|---|
 | [`docs/phase-1-baseline.md`](docs/phase-1-baseline.md) | Interpreter, lockfile, credential-free testing, CI |
 | [`docs/phase-2-validation.md`](docs/phase-2-validation.md) | Sharpe inference conventions, purged fold APIs, temporal isolation |
+| [`docs/phase-3-market-data.md`](docs/phase-3-market-data.md) | Provider boundary, replay, adapter fixes, live verification results |
 | [`docs/README.md`](docs/README.md) | Index of architecture decision records (they live in each module's `narrative.md`) |
 | [`evidence/R-03.md`](evidence/R-03.md) | Independent verification of phases 1–2, defects found, C++ build |
 | [`evidence/bench-order-book.json`](evidence/bench-order-book.json) | Raw benchmark output |

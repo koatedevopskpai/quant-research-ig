@@ -104,26 +104,35 @@ class _SubscriptionBridge(SubscriptionListener):
         self._item_names = item_names
         self._callback = callback
 
-    def on_item_update(self, update: ItemUpdate) -> None:
+    def onItemUpdate(self, update: ItemUpdate) -> None:
         """
-        Called by Lightstreamer when subscribed fields receive updates.
+        SDK callback — the name must match `SubscriptionListener` exactly.
 
-        WHY iterating dir(update.getValue):
-            Lightstreamer's ItemUpdate.getValue() interface does not expose
-            a list of available fields directly. We use dir() to enumerate
-            all field names that have values in this update.
+        WHY THE NAME MATTERS:
+            `lightstreamer-client-lib` calls `onItemUpdate`. The previous
+            implementation defined `on_item_update`, so the base class method
+            stayed in place and no update was ever delivered. Verified live: the
+            stream connected, the subscription was accepted, and the callback
+            never fired.
 
-        WHY converting to string:
-            Lightstreamer sends all field values as strings. Consumers are
-            responsible for numeric conversion based on field type
-            (e.g., float for prices, int for volume).
+        WHY getFields() and not dir(update.getValue):
+            `dir()` on a bound method enumerates the method object's attributes,
+            not the fields in the update, so every lookup missed. getFields()
+            returns the field names carried by this update.
         """
         fields: dict[str, str] = {}
-        for name in dir(update.getValue):
-            val = update.getValue(name)
-            if val is not None:
-                fields[name] = str(val)
+        for name in update.getFields():
+            value = update.getValue(name)
+            if value is not None:
+                # Canonical uppercase keys: IG mixes "Bid"/"BID" and
+                # "Ltp"/"LTP" across adapters, and downstream consumers should
+                # not have to guess.
+                fields[name.upper()] = str(value)
         self._callback(update.getItemName(), fields)
+
+    def on_item_update(self, update: ItemUpdate) -> None:
+        """Deprecated alias kept so callers/tests that named the old hook work."""
+        self.onItemUpdate(update)
 
     def on_subscription(self) -> None:
         logger.info("Subscribed to %s", self._item_names)

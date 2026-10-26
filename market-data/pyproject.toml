@@ -15,6 +15,7 @@ dependencies = [
     "pydantic>=2.0",
     "python-dotenv>=1.0",
     "lightstreamer-client-lib>=2.2",
+    "websockets>=13",
 ]
 
 [project.optional-dependencies]
