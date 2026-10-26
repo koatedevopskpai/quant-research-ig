@@ -288,6 +288,31 @@ class OrderBook:
                         insert_idx = i + 1
                     self._bids.insert(insert_idx, level)
 
+    def apply_l1(
+        self,
+        bid: float,
+        ask: float,
+        bid_size: float = 0.0,
+        ask_size: float = 0.0,
+    ) -> None:
+        """
+        Replace the book with a top-of-book (L1) snapshot.
+
+        WHY THIS EXISTS:
+            An L1 quote is a SNAPSHOT of the best bid and offer, not a depth
+            diff. Applying it through `apply_diff` had two failure modes:
+              * levels that were not mentioned were never removed, so stale
+                quotes survived (the review reproduced a crossed book, bid 100
+                versus ask 1.1, from two instruments in one book);
+              * a size of 0 means "delete" in the diff path, so an IG quote with
+                no sizes erased the level it was meant to update.
+            Replacing both sides is the correct semantic, and it makes the
+            difference between L1 and L2 explicit at the call site.
+        """
+        bids = [PriceLevel(float(bid), float(bid_size), 0)] if bid and bid > 0 else []
+        asks = [PriceLevel(float(ask), float(ask_size), 0)] if ask and ask > 0 else []
+        self.apply_snapshot(bids, asks)
+
     def apply_snapshot(
         self,
         bids: list[PriceLevel],

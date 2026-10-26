@@ -94,10 +94,20 @@ class ProductionRunner:
         self.message_bus = MessageBus()
         self.audit_trail = AuditTrail()
 
-        # HFT pipeline
+        # Epics
+        self.epics = list(EPICS)
+
+        # HFT pipeline — one book, one analyser and one price history PER EPIC.
+        # Sharing them was a data-corruption defect: feeding instrument A at
+        # 100/101 and B at 1/1.1 produced a crossed book (bid 100, ask 1.1) and
+        # a mixed price series that research then labelled with the first EPIC.
         self.tick_consumer = TickConsumer()
-        self.order_book = OrderBook()
-        self.microstructure = MicrostructureAnalyser()
+        self.books: dict[str, OrderBook] = {epic: OrderBook() for epic in self.epics}
+        self.analysers: dict[str, MicrostructureAnalyser] = {
+            epic: MicrostructureAnalyser() for epic in self.epics
+        }
+        self._price_caches: dict[str, list[float]] = {epic: [] for epic in self.epics}
+
         self.toxicity = ToxicityDetector()
         self.execution_sim = ExecutionSimulator()
 
@@ -116,13 +126,9 @@ class ProductionRunner:
             total_capital=INITIAL_CAPITAL,
         )
 
-        # Epics
-        self.epics = list(EPICS)
-
         # Timing state
         self._last_research_time: float = 0.0
         self._last_risk_check_time: float = 0.0
-        self._price_cache: list[float] = []
 
     # ── Setup ───────────────────────────────────────────────────────
 
@@ -158,21 +164,39 @@ class ProductionRunner:
     # ── Market data callback ────────────────────────────────────────
 
     def _on_market_data(self, msg: MarketDataMessage) -> None:
-        """Handle an incoming market data tick from the feed."""
-        if msg.message_type == "L1":
-            self.order_book.apply_diff(
-                "bid", msg.bid_price, msg.bid_size,
-            ) if msg.bid_price > 0 else None
-            self.order_book.apply_diff(
-                "ask", msg.ask_price, msg.ask_size,
-            ) if msg.ask_price > 0 else None
+        """
+        Route an update to its own instrument's state.
 
-        self.microstructure.on_tick(msg)
+        WHY routing on msg.epic:
+            The runner subscribes to several EPICs. Previously every update went
+            into one book, one analyser and one price list, so two instruments
+            contaminated each other (a crossed book, and a mixed research input
+            labelled with whichever EPIC came first).
+        """
+        epic = msg.epic
+        book = self.books.get(epic)
+        if book is None:
+            logger.debug("Ignoring update for unknown epic %s", epic)
+            return
+
+        if msg.message_type == "L1":
+            # IG L1 is a snapshot of the top of book, not a depth diff.
+            book.apply_l1(msg.bid_price, msg.ask_price, msg.bid_size, msg.ask_size)
+        elif msg.message_type == "L2":
+            if msg.bid_price > 0:
+                book.apply_diff("bid", msg.bid_price, msg.bid_size, 0)
+            if msg.ask_price > 0:
+                book.apply_diff("ask", msg.ask_price, msg.ask_size, 0)
+
+        analyser = self.analysers.get(epic)
+        if analyser is not None:
+            analyser.on_tick(msg)
 
         if msg.last_price > 0:
-            self._price_cache.append(msg.last_price)
-            if len(self._price_cache) > 1000:
-                self._price_cache = self._price_cache[-1000:]
+            cache = self._price_caches[epic]
+            cache.append(msg.last_price)
+            if len(cache) > 1000:
+                del cache[:-1000]
 
     # ── Agent wiring callbacks ──────────────────────────────────────
 
@@ -187,8 +211,13 @@ class ProductionRunner:
             logger.warning("Research error for %s: %s", epic, output["error"])
             return
 
-        l1 = self.order_book.l1_snapshot()
-        if l1 is None:
+        book = self.books.get(epic)
+        if book is None:
+            logger.warning("No book for %s — skipping signal", epic)
+            return
+        try:
+            l1 = book.l1_snapshot()
+        except ValueError:
             logger.warning("No L1 data for %s — skipping signal", epic)
             return
 
@@ -216,17 +245,23 @@ class ProductionRunner:
 
     def _run_research(self) -> None:
         """Run ML research on the latest market data."""
-        if len(self._price_cache) < 50:
-            logger.info("Not enough price data for research (%d points)",
-                         len(self._price_cache))
-            return
-
         import numpy as np
-        prices = np.array(self._price_cache)
-        epic = EPICS[0]
-        request = ResearchRequest(epic=epic, model_type="regime")
-        result = self.research_agent.research(request, prices)
-        logger.info("Research complete: %s", result.summary[:100])
+
+        researched = 0
+        for epic in self.epics:
+            cache = self._price_caches[epic]
+            if len(cache) < 50:
+                continue
+            prices = np.array(cache)
+            request = ResearchRequest(epic=epic, model_type="regime")
+            result = self.research_agent.research(request, prices)
+            logger.info("Research complete for %s: %s", epic, result.summary[:100])
+            researched += 1
+
+        if researched == 0:
+            logger.info(
+                "Not enough price data for research (need 50 points per epic)"
+            )
 
     def _check_risk(self) -> None:
         """Periodic risk assessment."""
@@ -244,7 +279,9 @@ class ProductionRunner:
         """Background periodic tasks: research, risk check, PnL."""
         l1 = None
         try:
-            l1 = self.order_book.l1_snapshot()
+            # P&L is still derived from the first EPIC's mid price; per-ledger
+            # mark-to-market is phase 6.
+            l1 = self.books[self.epics[0]].l1_snapshot()
         except ValueError:
             pass
 
@@ -273,8 +310,8 @@ class ProductionRunner:
         self.tick_consumer.connect()
 
         dashboard = Dashboard(
-            order_book=self.order_book,
-            microstructure=self.microstructure,
+            order_book=self.books[self.epics[0]],
+            microstructure=self.analysers[self.epics[0]],
             toxicity=self.toxicity,
             execution_agent=self.execution_agent,
             risk_manager=self.risk_manager,

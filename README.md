@@ -23,7 +23,7 @@ is actually demonstrated versus merely intended.
 |---|---|---|---|
 | **1. Reproducible baseline** | supported interpreter, locked dependencies, credential-free install and collection, CI | **Complete** | [`docs/phase-1-baseline.md`](docs/phase-1-baseline.md) |
 | **2. Correct statistical validation** | PSR/DSR units and moments, look-ahead removal, model fitting inside purged CPCV / walk-forward folds | **Complete on this branch** ([PR #2](https://github.com/koatedevopskpai/quant-research-ig/pull/2)) | [`docs/phase-2-validation.md`](docs/phase-2-validation.md) |
-| **3. Market-data handling** | Lightstreamer callback and field mapping, L1 vs L2 semantics, per-instrument state isolation, opening prices, timestamps | **In progress** — provider layer, replay and adapter fixes done; runner routing and ingestion outstanding | [`docs/phase-3-market-data.md`](docs/phase-3-market-data.md) |
+| **3. Market-data handling** | Lightstreamer callback and field mapping, L1 vs L2 semantics, per-instrument state isolation, opening prices, timestamps | **Complete** for the provider-neutral pipeline; IG live verification deferred | [`docs/phase-3-market-data.md`](docs/phase-3-market-data.md) |
 | **4. Research model contracts** | typed model input/output adapters, HMM/XGBoost registration, explicit regime → direction/confidence policy | Planned | — |
 | **5. Paper execution** | order IDs, lifecycle states, simulated fills, position ledger, reductions/exits/reversals/partials, stop and target handling | Planned | — |
 | **6. Risk controls** | P&L and exposure from the ledger, daily reset and capital updates, idempotent halt/resume, enforcement on every path | Planned | — |
@@ -124,16 +124,16 @@ MSVC 19.51 for the C++ job. No `.env`, IG session, database or LLM key.
 |---|---|
 | `uv run --locked python scripts/check_baseline.py` | all five distributions import |
 | `uv run --locked python scripts/check_validation.py` | published DSR reference `0.9003968344` |
-| `uv run --locked pytest` | **504 passed**, 24 skipped (C++ extension unbuilt) |
-| `uv run --locked pytest` after `build_cpp` | **528 passed**, 0 skipped |
+| `uv run --locked pytest` | **522 passed**, 24 skipped (C++ extension unbuilt) |
+| `uv run --locked pytest` after `build_cpp` | **546 passed**, 0 skipped |
 
 | Module | Tests |
 |---|---|
-| `market-data` | 54 |
+| `market-data` | 63 |
 | `quant-methods` | 128 |
-| `hft-engine` | 154 (24 need the compiled extension) |
+| `hft-engine` | 157 (24 need the compiled extension) |
 | `ml-for-finance` | 25 |
-| `agentic-finance` | 167 |
+| `agentic-finance` | 173 |
 
 Live read-only provider checks (see [`docs/phase-3-market-data.md`](docs/phase-3-market-data.md)):
 Binance `BTCUSDT` delivered 5,453 L2 events and 676 trades in 15 s. IG is
@@ -286,7 +286,7 @@ strategy has yet been promoted through them end to end (phase 8).
 
 | Module | Phase | State |
 |---|---|---|
-| `market-data` | 1–3 | IG v3 OAuth client, PostgreSQL schema with BRIN, and a provider layer (IG / Dukascopy / Binance / replay). Adapter defects are fixed; **IG is deferred** (account suspended) and L1 `MARKET:` delivery is unexplained. Per-instrument routing and ingestion normalisation remain. |
+| `market-data` | 1–3 | IG v3 OAuth client, PostgreSQL schema with BRIN, and a provider layer (IG / Dukascopy / Binance / replay). Adapter defects, per-EPIC routing and ingestion normalisation are fixed. **IG live verification is deferred** (account suspended); L1 `MARKET:` delivery is unexplained. |
 | `quant-methods` | 1–2 | Pricing, GARCH, portfolio optimisation, and the reference-tested validation suite. |
 | `hft-engine` | 1–2 | Python book/feeds/microstructure plus a compiled C++ accelerator: order book, tick parsers, toxicity detector, execution/colocation/latency/market-sim. |
 | `ml-for-finance` | 2 | HMM regimes, XGBoost with chronological partitions, LSTM, sentiment models. Temporal leakage removed. |
@@ -307,10 +307,10 @@ phases 1–2. Each is assigned to the phase that will fix it.
 - **L1 vs L2** *(phase 3)* — successive top-of-book quotes are applied as
   incremental depth updates, so stale levels persist, and the live L1
   subscription supplies none of the sizes the book update assumes.
-- **Instrument isolation** *(phase 3)* — the runner keeps one book, analyser and
-  price cache for all EPICs instead of routing on `msg.epic`.
-- **Ingestion** *(phase 3)* — opening prices are filled from closing prices, and
-  timezone-naive timestamps are not normalised to UTC.
+- **Instrument isolation** *(fixed)* — the runner now keeps one book, analyser and
+  price history per EPIC and routes on `msg.epic`.
+- **Ingestion** *(fixed)* — opening prices come from `openPrice` (not close), and
+  timestamps are normalised to timezone-aware UTC, preferring `snapshotTimeUTC`.
 - **Model contracts** *(phase 4)* — no models are registered by the runner, the
   HMM adapter calls `predict()` without `X`, the XGBoost adapter reads a
   non-existent `forecast` attribute, and regime labels are names where numeric

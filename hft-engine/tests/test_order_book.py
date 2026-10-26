@@ -277,3 +277,33 @@ class TestOrderBookPurePython:
         except ImportError:
             book = OrderBook()
             assert book._use_cpp is False
+
+class TestApplyL1:
+    """L1 quotes are snapshots; applying them as diffs left stale levels."""
+
+    def test_replacement_removes_the_previous_best(self):
+        book = OrderBook()
+        book.apply_l1(100.0, 101.0, 5, 6)
+        book.apply_l1(90.0, 95.0, 1, 2)
+        snap = book.l1_snapshot()
+        assert snap.bid_price == 90.0
+        assert snap.ask_price == 95.0
+
+    def test_zero_size_is_not_a_delete(self):
+        """IG L1 has no sizes; the diff path treated size 0 as 'remove level'."""
+        book = OrderBook()
+        book.apply_l1(100.0, 101.0)
+        snap = book.l1_snapshot()
+        assert snap.bid_price == 100.0
+        assert snap.ask_price == 101.0
+
+    def test_l1_after_depth_snapshot_reduces_to_one_level(self):
+        book = OrderBook()
+        book.apply_snapshot(
+            [PriceLevel(100.0, 3, 1), PriceLevel(99.0, 4, 1)],
+            [PriceLevel(101.0, 3, 1), PriceLevel(102.0, 4, 1)],
+        )
+        book.apply_l1(100.5, 100.6)
+        snap = book.l1_snapshot()
+        assert snap.bid_price == 100.5
+        assert snap.ask_price == 100.6

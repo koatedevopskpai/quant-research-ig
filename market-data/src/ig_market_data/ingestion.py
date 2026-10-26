@@ -63,7 +63,7 @@ METHODOLOGY NOTE (Bryan Downing):
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import create_engine
@@ -72,6 +72,51 @@ from sqlalchemy.orm import Session
 from ig_market_data.client import IGClient
 from ig_market_data.config import pg_settings
 from ig_market_data.models import OHLCVDaily, OHLCVHourly
+
+
+_TS_FORMATS = (
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y/%m/%d %H:%M:%S",
+)
+
+
+def _parse_snapshot_time(entry: dict) -> Optional[datetime]:
+    """
+    Return a timezone-aware UTC timestamp for an IG price entry.
+
+    WHY THIS EXISTS:
+        IG returns `snapshotTimeUTC` (ISO with an offset) and `snapshotTime`
+        (ISO with NO timezone). `datetime.fromisoformat` on the latter produces
+        a naive datetime, and storing a naive value in TIMESTAMPTZ makes
+        PostgreSQL interpret it in the session timezone — so the same row means
+        different instants on different machines. Timestamps are now normalised
+        explicitly, preferring the provider's UTC field.
+    """
+    raw = entry.get("snapshotTimeUTC") or entry.get("snapshotTime")
+    if not raw:
+        return None
+
+    text = str(raw).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except (ValueError, TypeError):
+        parsed = None
+        for fmt in _TS_FORMATS:
+            try:
+                parsed = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+        if parsed is None:
+            return None
+
+    if parsed.tzinfo is None:
+        # IG's snapshotTime carries no zone; the feed is UTC by convention.
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 logger = logging.getLogger(__name__)
 
@@ -180,26 +225,15 @@ def ingest_prices(
         rows = 0
         with Session(engine) as session:
             for p in prices:
-                # WHY timestamp is stored as-is from IG:
-                #   IG's snapshotTime is the exchange timestamp. PostgreSQL
-                #   TIMESTAMPTZ coerces to UTC automatically.
-                ts_str = p.get("snapshotTime")
-                if not ts_str:
-                    continue
-
-                # WHY accepting both ISO and IG-format timestamps:
-                #   IG returns "2025-01-02T17:00:00" format for most
-                #   endpoints but may vary by instrument type. Python's
-                #   fromisoformat handles ISO 8601; we add a fallback for
-                #   other formats if needed.
-                try:
-                    ts = datetime.fromisoformat(ts_str)
-                except (ValueError, TypeError):
+                ts = _parse_snapshot_time(p)
+                if ts is None:
                     logger.warning(
-                        "Skipping row with unparseable timestamp: %s", ts_str
+                        "Skipping row with missing/unparseable timestamp: %s",
+                        p.get("snapshotTimeUTC") or p.get("snapshotTime"),
                     )
                     continue
 
+                open_ = p.get("openPrice", {})
                 close = p.get("closePrice", {})
                 high = p.get("highPrice", {})
                 low = p.get("lowPrice", {})
@@ -218,8 +252,8 @@ def ingest_prices(
                     high_ask=high.get("ask"),
                     low_bid=low.get("bid"),
                     low_ask=low.get("ask"),
-                    open_bid=close.get("bid"),  # IG provides close only in history
-                    open_ask=close.get("ask"),
+                    open_bid=open_.get("bid"),
+                    open_ask=open_.get("ask"),
                     volume=p.get("lastTradedVolume"),
                 )
                 session.merge(row)
