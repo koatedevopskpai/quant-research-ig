@@ -1,11 +1,13 @@
 """
-provider_smoke.py — live, read-only checks for the non-IG providers.
+provider_smoke.py — live, read-only checks for the market-data providers.
 
     python scripts/provider_smoke.py binance  --symbol BTCUSDT --seconds 20
     python scripts/provider_smoke.py dukascopy --instrument EURUSD --date 2026-10-20 --hour 10
+    python scripts/provider_smoke.py ig       --epic-l1 CS.D.EURUSD.CFD.IP --seconds 15
 
 Not part of CI: CI must never depend on a network or a vendor. These exist so a
-human can confirm a provider is alive after a dependency or endpoint change.
+human can confirm a provider is alive after a dependency or endpoint change, and
+so the IG deferment in the README has a concrete exit test.
 """
 
 from __future__ import annotations
@@ -61,6 +63,69 @@ def dukascopy(instrument: str, date: str, hour: int) -> None:
     print(f"  spread: median={statistics.median(spreads):.5f} max={max(spreads):.5f}")
 
 
+def ig(epic_l1: str, epic_ticks: str, seconds: float) -> None:
+    """IG demo check: auth, L1 replacement, tick freshness, then reconnect."""
+    import time
+
+    from ig_market_data.providers.ig import IGProvider
+
+    counts = {
+        "l1": 0,
+        "trade": 0,
+        "after_reconnect": 0,
+        "l1_sample": None,
+        "trade_sample": None,
+        "utm_age_ms": [],
+    }
+
+    def on_l1(event) -> None:
+        counts["l1"] += 1
+        if counts["l1_sample"] is None:
+            counts["l1_sample"] = (event.bid, event.ask, event.book_action)
+
+    def on_trade(event) -> None:
+        counts["trade"] += 1
+        counts["utm_age_ms"].append((time.time_ns() - event.provider_ts_ns) / 1e6)
+        if counts["trade_sample"] is None:
+            counts["trade_sample"] = (event.last, event.size)
+
+    def on_trade_after(event) -> None:
+        counts["after_reconnect"] += 1
+
+    provider = IGProvider()
+    provider.connect()
+    provider.subscribe(epic_l1, "l1", on_l1)
+    provider.subscribe(epic_ticks, "trade", on_trade)
+    time.sleep(seconds)
+
+    provider.disconnect()
+    time.sleep(3)
+    provider.connect()
+    time.sleep(3)
+    provider.subscribe(epic_ticks, "trade", on_trade_after)
+    time.sleep(max(seconds / 2, 5))
+
+    provider.disconnect()
+
+    print(f"l1={epic_l1} ticks={epic_ticks} seconds={seconds}")
+    print(f"  L1 events:        {counts['l1']}")
+    print(f"  trade events:     {counts['trade']}")
+    print(f"  after reconnect:  {counts['after_reconnect']}")
+    if counts["l1_sample"]:
+        print(f"  L1 sample:        bid/ask/action={counts['l1_sample']}")
+    if counts["trade_sample"]:
+        print(f"  trade sample:     last/size={counts['trade_sample']}")
+    if counts["utm_age_ms"]:
+        ages = sorted(counts["utm_age_ms"])
+        print(
+            f"  provider UTM age: median={ages[len(ages)//2]:.0f} ms "
+            f"min={ages[0]:.0f} max={ages[-1]:.0f}"
+        )
+    if counts["l1"] == 0:
+        print("  NOTE: no L1 events. This is the open question in")
+        print("        docs/phase-3-market-data.md (MARKET: items delivered nothing).")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="source", required=True)
@@ -74,11 +139,18 @@ def main() -> None:
     d.add_argument("--date", default="2026-10-20")
     d.add_argument("--hour", type=int, default=10)
 
+    i = sub.add_parser("ig")
+    i.add_argument("--epic-l1", default="CS.D.EURUSD.CFD.IP")
+    i.add_argument("--epic-ticks", default="IX.D.SPTRD.IFD.IP")
+    i.add_argument("--seconds", type=float, default=15.0)
+
     args = parser.parse_args()
     if args.source == "binance":
         binance(args.symbol, args.seconds)
-    else:
+    elif args.source == "dukascopy":
         dukascopy(args.instrument, args.date, args.hour)
+    else:
+        ig(args.epic_l1, args.epic_ticks, args.seconds)
 
 
 if __name__ == "__main__":

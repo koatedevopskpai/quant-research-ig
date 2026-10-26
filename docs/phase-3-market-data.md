@@ -4,8 +4,15 @@ Status: **partial**. The provider layer, the two confirmed IG adapter defects an
 a deterministic replay path are done and tested. Per-instrument routing in the
 runner and ingestion/normalisation defects are not yet done. Phase 3 stays open.
 
-Motivation: the IG account was suspended during verification, which made every
-data-path claim depend on a broker account. That is the defect behind the defect.
+> **IG deferred (2026-10-26).** The demo account was suspended after the single
+> authorised read-only session recorded below. The adapter fixes are proven by
+> that session and by tests, but ongoing IG delivery is unverified. The README
+> section **Deferred: IG integration** holds the current status and the four
+> criteria for un-deferring; `python scripts/provider_smoke.py ig` is the exit
+> test. Do not read this document as evidence that IG works today.
+
+Motivation: the suspension made every data-path claim depend on a broker
+account. That is the defect behind the defect.
 
 ## What changed
 

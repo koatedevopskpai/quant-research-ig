@@ -56,6 +56,65 @@ cannot publish anything it cannot reproduce.
 
 ---
 
+## Deferred: IG integration
+
+**Status: deferred 2026-10-26 — account suspended.**
+
+The IG demo account used for verification was suspended part-way through phase 3.
+This section records exactly what was and was not demonstrated before that, so
+nothing here can be read as evidence that IG works today.
+
+IG remains the target venue. Spread-betting tax treatment is not something a
+crypto or historical feed replaces, so the integration is deferred, not dropped.
+The provider layer exists so the rest of the system does not stall while the
+account is unavailable.
+
+### Demonstrated before suspension (one authorised demo session, read-only)
+
+| Check | Result |
+|---|---|
+| REST auth (v3 OAuth) | passed — demo account `Z3***` |
+| Markets | EUR/USD and US 500 both `TRADEABLE` |
+| Historical prices (MINUTE) | 3 points returned |
+| Repo streaming adapter, unfixed | **0 callbacks in 15 s** — the review's defect reproduced live |
+| Repo streaming adapter, fixed | **63 ticks in 30 s**, provider timestamp age −176…+549 ms, **41 ticks after reconnect** |
+| L1 `MARKET:` items | **nothing delivered**, no subscription error, across MERGE/DISTINCT, both EPICs and several field sets |
+
+No order was submitted on any account. The session was market-data only.
+
+### Not verified
+
+- Ongoing IG delivery. The adapter code is fixed; the transport cannot currently
+  be observed, so "fixed" means "the defect was reproducible, the change removed
+  it in one session, and tests pin the behaviour" — not "IG works".
+- The L1 `MARKET:` silence. Ticks on `CHART:` worked on the same connection, so
+  it is not auth or transport; the cause is unknown.
+- Any IG execution, position, or account path.
+- Field mapping beyond the fields observed in that session.
+
+### What substitutes meanwhile
+
+| Need | Substitute | Limitation |
+|---|---|---|
+| Live L2 depth, reconnect, backpressure | `BinanceProvider` (public streams) | crypto, 24/7, not IG semantics |
+| Historical FX bid/ask ticks | `DukascopyTicks` (`.bi5`) | historical only, no streaming |
+| Deterministic CI | `ReplayProvider` (JSONL) | proves plumbing, not IG delivery |
+| IG-shaped schemas | synthetic fixtures + captured samples | fixtures cannot prove IG behaviour |
+
+### Criteria to un-defer
+
+1. Account restored.
+2. `python scripts/provider_smoke.py ig` passes: auth, L1 replacement, tick
+   timestamps, and delivery after disconnect/reconnect.
+3. The L1 `MARKET:` question is answered — either it works, or the cause is
+   documented.
+4. Results recorded in [`docs/phase-3-market-data.md`](docs/phase-3-market-data.md)
+   with the date and revision, and this section replaced by the new evidence.
+
+Until all four hold, the README's "verified state" must not include IG streaming.
+
+---
+
 ## Verified state
 
 Reproduced locally on 2026-10-26: Windows 11, CPython 3.12.15, `uv sync --locked`,
@@ -77,9 +136,9 @@ MSVC 19.51 for the C++ job. No `.env`, IG session, database or LLM key.
 | `agentic-finance` | 167 |
 
 Live read-only provider checks (see [`docs/phase-3-market-data.md`](docs/phase-3-market-data.md)):
-Binance `BTCUSDT` delivered 5,453 L2 events and 676 trades in 15 s; IG delivered
-63 ticks in 30 s with 401–548 ms provider timestamps before the account was
-suspended.
+Binance `BTCUSDT` delivered 5,453 L2 events and 676 trades in 15 s. IG is
+deferred — its pre-suspension results are recorded under
+**Deferred: IG integration**, not here.
 
 Exact commands, failure modes and outstanding defects:
 [`evidence/R-03.md`](evidence/R-03.md). Remote CI has not been observed yet; the
@@ -227,7 +286,7 @@ strategy has yet been promoted through them end to end (phase 8).
 
 | Module | Phase | State |
 |---|---|---|
-| `market-data` | 1–3 | IG v3 OAuth client, PostgreSQL schema with BRIN, Lightstreamer code. Streaming callback/field mapping and L1-as-L2 handling remain defective (phase 3). No live run. |
+| `market-data` | 1–3 | IG v3 OAuth client, PostgreSQL schema with BRIN, and a provider layer (IG / Dukascopy / Binance / replay). Adapter defects are fixed; **IG is deferred** (account suspended) and L1 `MARKET:` delivery is unexplained. Per-instrument routing and ingestion normalisation remain. |
 | `quant-methods` | 1–2 | Pricing, GARCH, portfolio optimisation, and the reference-tested validation suite. |
 | `hft-engine` | 1–2 | Python book/feeds/microstructure plus a compiled C++ accelerator: order book, tick parsers, toxicity detector, execution/colocation/latency/market-sim. |
 | `ml-for-finance` | 2 | HMM regimes, XGBoost with chronological partitions, LSTM, sentiment models. Temporal leakage removed. |
@@ -240,11 +299,11 @@ strategy has yet been promoted through them end to end (phase 8).
 The defects below were reproduced in the 2026-10 review and are **not** fixed by
 phases 1–2. Each is assigned to the phase that will fix it.
 
-- **Streaming adapters** *(phase 3, code fixed / live unverified)* — `onItemUpdate`
+- **Streaming adapters** *(phase 3, code fixed / IG deferred)* — `onItemUpdate`
   and `getFields()` are implemented and the tick-casing bug is fixed, but IG
-  delivery is unverified while the account is suspended. An IG L1 `MARKET:` item
-  delivered nothing even with the corrected callback and no subscription error;
-  cause unknown. See `docs/phase-3-market-data.md`.
+  delivery is unverified while the account is suspended (see **Deferred: IG
+  integration**). An IG L1 `MARKET:` item delivered nothing even with the
+  corrected callback and no subscription error; cause unknown.
 - **L1 vs L2** *(phase 3)* — successive top-of-book quotes are applied as
   incremental depth updates, so stale levels persist, and the live L1
   subscription supplies none of the sizes the book update assumes.
