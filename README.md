@@ -28,7 +28,7 @@ is actually demonstrated versus merely intended.
 | **5. Paper execution** | order IDs, lifecycle states, simulated fills, position ledger, reductions/exits/reversals/partials, stop and target handling | **Complete** — risk integration remains phase 6 | [`docs/phase-5-execution.md`](docs/phase-5-execution.md) |
 | **6. Risk controls** | P&L and exposure from the ledger, daily reset and capital updates, idempotent halt/resume, enforcement on every path | **Complete** | [`docs/phase-6-risk.md`](docs/phase-6-risk.md) |
 | **7. Security and replay** | loopback-by-default API, authentication for shared deployments, restricted bus publication, deterministic end-to-end replay | **Complete** | [`docs/phase-7-security-replay.md`](docs/phase-7-security-replay.md) |
-| **8. Published research evidence** | one fixed experiment with costs, benchmark, chronological holdout, promotion gates, reproducible from the documented revision | Planned | — |
+| **8. Published research evidence** | one fixed experiment with costs, benchmark, chronological holdout, promotion gates, reproducible from the documented revision | **Complete** — the strategy is **not promoted** | [`docs/phase-8-experiment.md`](docs/phase-8-experiment.md) |
 
 ### Exit criteria
 
@@ -124,8 +124,8 @@ MSVC 19.51 for the C++ job. No `.env`, IG session, database or LLM key.
 |---|---|
 | `uv run --locked python scripts/check_baseline.py` | all five distributions import |
 | `uv run --locked python scripts/check_validation.py` | published DSR reference `0.9003968344` |
-| `uv run --locked pytest` | **589 passed**, 24 skipped (C++ extension unbuilt) |
-| `uv run --locked pytest` after `build_cpp` | **613 passed**, 0 skipped |
+| `uv run --locked pytest` | **604 passed**, 24 skipped (C++ extension unbuilt) |
+| `uv run --locked pytest` after `build_cpp` | **628 passed**, 0 skipped |
 
 | Module | Tests |
 |---|---|
@@ -133,7 +133,7 @@ MSVC 19.51 for the C++ job. No `.env`, IG session, database or LLM key.
 | `quant-methods` | 128 |
 | `hft-engine` | 157 (24 need the compiled extension) |
 | `ml-for-finance` | 25 |
-| `agentic-finance` | 240 |
+| `agentic-finance` | 255 |
 
 Live read-only provider checks (see [`docs/phase-3-market-data.md`](docs/phase-3-market-data.md)):
 Binance `BTCUSDT` delivered 5,453 L2 events and 676 trades in 15 s. IG is
@@ -149,6 +149,20 @@ themselves: the tests reproduce the published Bailey & López de Prado (2014)
 worked example (benchmark `0.1132`, DSR `0.9004`, `0.9505` for 46 trials), and a
 zero-skill calibration over 1000 random walks dropped from **47.5%** false
 positives under the old formula to **5.9%**.
+
+---
+
+## Research evidence
+
+One fixed experiment: deterministic six-year synthetic dataset, momentum lookback
+selected on train+validation, a single chronological holdout, 2 bps costs and a
+buy-and-hold benchmark. Promotion requires positive Sharpe, beating the benchmark,
+PSR ≥ 0.95, DSR ≥ 0.95, monkey-test p < 0.05 and a bounded drawdown.
+
+**Result: not promoted.** Holdout Sharpe **0.29** vs benchmark **0.70**; PSR
+0.62, DSR 0.52, monkey p = 0.58. The method is reproducible from the documented
+revision; the strategy is not claimed to have an edge. Details and the
+reproduction command: [`docs/phase-8-experiment.md`](docs/phase-8-experiment.md).
 
 ---
 
@@ -205,7 +219,14 @@ provider.replay()          # speed=10 to pace by provider time
 python -m agentic_finance.replay --steps 160
 python -m agentic_finance.replay --steps 160 --shock-after 60 --shock-pct 0.4 \
     --daily-loss-limit 0.005 --stop-loss-pct 0.5
+
+# One fixed experiment with promotion gates
+python -m agentic_finance.experiment --json evidence/experiment.json
 ```
+
+State persists to `state/quant.db` (git-ignored) for the runner and API; set
+`QUANT_STATE_DB` to move it, or `QUANT_PERSIST=0` to disable it. See
+[`docs/persistence.md`](docs/persistence.md).
 
 ---
 
@@ -297,7 +318,7 @@ strategy has yet been promoted through them end to end (phase 8).
 | `quant-methods` | 1–2 | Pricing, GARCH, portfolio optimisation, and the reference-tested validation suite. |
 | `hft-engine` | 1–2 | Python book/feeds/microstructure plus a compiled C++ accelerator: order book, tick parsers, toxicity detector, execution/colocation/latency/market-sim. |
 | `ml-for-finance` | 2 | HMM regimes, XGBoost with chronological partitions, LSTM, sentiment models. Temporal leakage removed. |
-| `agentic-finance` | 1, 4, 5, 6, 7 | Four agents, MessageBus, AuditTrail, FastAPI REST + WebSocket API, Streamlit and terminal dashboards. Research uses validated adapters, execution reconciles through a ledger, risk enforces halts from that ledger, and the API is loopback-by-default with a deterministic replay. Persistence is the remaining gap. |
+| `agentic-finance` | 1, 4, 5, 6, 7, 8 | Four agents, MessageBus, AuditTrail, FastAPI REST + WebSocket API, Streamlit and terminal dashboards. Research uses validated adapters, execution reconciles through a ledger, risk enforces halts from it, the API is loopback-by-default with deterministic replay, and state persists across restarts. |
 
 ---
 
@@ -318,6 +339,9 @@ phases 1–2. Each is assigned to the phase that will fix it.
   price history per EPIC and routes on `msg.epic`.
 - **Ingestion** *(fixed)* — opening prices come from `openPrice` (not close), and
   timestamps are normalised to timezone-aware UTC, preferring `snapshotTimeUTC`.
+- **Persistence** *(fixed)* — orders, fills, audit and risk state survive a
+  restart in SQLite (`QUANT_STATE_DB`). Fills are the source of truth, so a
+  restored book reconciles to the same numbers. Single-writer only.
 - **Model contracts** *(fixed)* — the runner registers real adapters, HMM and
   XGBoost results are translated through a validated `ModelOutput`, and
   direction/confidence come from a forecast rather than a regime label. The
@@ -356,6 +380,8 @@ phases 1–2. Each is assigned to the phase that will fix it.
 | [`evidence/bench-order-book.json`](evidence/bench-order-book.json) | Raw benchmark output |
 | [`evidence/replay-baseline.json`](evidence/replay-baseline.json) | Deterministic replay: invariant and reconciliation report |
 | [`evidence/replay-halt.json`](evidence/replay-halt.json) | Adverse-shock replay: halt, zero entries after halt |
+| [`evidence/experiment.json`](evidence/experiment.json) | Phase 8 experiment report, holdout metrics and gate results |
+| [`docs/persistence.md`](docs/persistence.md) | Durable state: what survives a restart and what does not |
 | [`evidence/W5-07.md`](evidence/W5-07.md) | Historical claim sweep on the earlier revision |
 
 ---

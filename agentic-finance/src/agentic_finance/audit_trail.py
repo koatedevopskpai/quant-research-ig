@@ -16,7 +16,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
-from agentic_finance.decision import Decision
+from agentic_finance.decision import Decision, DecisionStatus, DecisionType
 
 
 @dataclass
@@ -36,9 +36,10 @@ class AuditEntry:
 
 
 class AuditTrail:
-    def __init__(self):
+    def __init__(self, store: Any = None):
         self._entries: list[AuditEntry] = []
         self._decisions: dict[str, AuditEntry] = {}
+        self._store = store
 
     def record(self, decision: Decision, market_context: dict[str, Any] | None = None,
                signals_used: list[dict[str, Any]] | None = None,
@@ -51,7 +52,38 @@ class AuditTrail:
         )
         self._entries.append(entry)
         self._decisions[decision.decision_id] = entry
+        if self._store is not None:
+            self._store.save_audit_entry(entry)
         return entry
+
+    def restore(self) -> int:
+        """Rebuild the trail from the store (no-op if already populated)."""
+        if self._store is None or self._entries:
+            return len(self._entries)
+        for payload in self._store.load_audit_entries():
+            raw = payload.get("decision", {})
+            decision = Decision(
+                decision_id=raw["decision_id"],
+                timestamp=datetime.fromisoformat(raw["timestamp"]),
+                agent=raw.get("agent", ""),
+                decision_type=DecisionType(raw.get("decision_type", "audit")),
+                status=DecisionStatus(raw.get("status", "pending")),
+                description=raw.get("description", ""),
+                context=raw.get("context") or {},
+                reasoning=raw.get("reasoning", ""),
+                llm_explanation=raw.get("llm_explanation", ""),
+                parent_id=raw.get("parent_id"),
+                metadata=raw.get("metadata") or {},
+            )
+            entry = AuditEntry(
+                decision=decision,
+                market_context=payload.get("market_context") or {},
+                signals_used=payload.get("signals_used") or [],
+                tags=payload.get("tags") or [],
+            )
+            self._entries.append(entry)
+            self._decisions[decision.decision_id] = entry
+        return len(self._entries)
 
     def get(self, decision_id: str) -> Optional[AuditEntry]:
         return self._decisions.get(decision_id)

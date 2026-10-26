@@ -60,7 +60,7 @@ class Position:
 
 class PositionLedger:
     def __init__(self, initial_cash: float, commission_bps: float = 1.0,
-                 slippage_bps: float = 0.0) -> None:
+                 slippage_bps: float = 0.0, store: Any = None) -> None:
         if initial_cash <= 0:
             raise ValueError("initial_cash must be positive")
         if commission_bps < 0 or slippage_bps < 0:
@@ -73,6 +73,7 @@ class PositionLedger:
         self.fills: list[Fill] = []
         self.total_commission = 0.0
         self.realized_pnl = 0.0
+        self._store = store
 
     # ------------------------------------------------------------------
     # Fills
@@ -92,42 +93,9 @@ class PositionLedger:
         slip = (self.slippage_bps if slippage_bps is None else slippage_bps) / 10_000
         fill_price = (reference_price * (1 + slip) if side == "buy"
                       else reference_price * (1 - slip))
-        notional = quantity * fill_price
-        commission = notional * (self.commission_bps if commission_bps is None
-                                 else commission_bps) / 10_000
-
-        position = self.positions.setdefault(epic, Position(epic=epic))
-        signed = quantity if side == "buy" else -quantity
-        old_qty = position.quantity
-        new_qty = old_qty + signed
-
-        if abs(old_qty) < _EPS or (old_qty > 0) == (signed > 0):
-            # Opening or increasing: weighted average cost.
-            total = abs(old_qty) + quantity
-            position.avg_price = (
-                (abs(old_qty) * position.avg_price + quantity * fill_price) / total
-            )
-        else:
-            # Reducing or reversing: book realised P&L on the closed part.
-            closing = min(abs(old_qty), quantity)
-            if old_qty > 0:
-                realised = closing * (fill_price - position.avg_price)
-            else:
-                realised = closing * (position.avg_price - fill_price)
-            position.realized_pnl += realised
-            self.realized_pnl += realised
-
-            if abs(new_qty) < _EPS:
-                position.avg_price = 0.0
-                new_qty = 0.0
-            elif (new_qty > 0) != (old_qty > 0):
-                # Reversal: the remainder is a new position at this price.
-                position.avg_price = fill_price
-
-        position.quantity = new_qty
-
-        self.cash += (-notional if side == "buy" else notional) - commission
-        self.total_commission += commission
+        commission = quantity * fill_price * (
+            self.commission_bps if commission_bps is None else commission_bps
+        ) / 10_000
 
         fill = Fill(
             fill_id=uuid.uuid4().hex[:12],
@@ -140,8 +108,51 @@ class PositionLedger:
             commission=float(commission),
             timestamp=datetime.now(timezone.utc),
         )
-        self.fills.append(fill)
+        self._book(fill)
+        if self._store is not None:
+            self._store.save_fill(fill)
         return fill
+
+    def _book(self, fill: Fill) -> None:
+        """Apply a fill's economics. Shared by live fills and restore."""
+        position = self.positions.setdefault(fill.epic, Position(epic=fill.epic))
+        signed = fill.quantity if fill.side == "buy" else -fill.quantity
+        old_qty = position.quantity
+        new_qty = old_qty + signed
+
+        if abs(old_qty) < _EPS or (old_qty > 0) == (signed > 0):
+            total = abs(old_qty) + fill.quantity
+            position.avg_price = (
+                (abs(old_qty) * position.avg_price + fill.quantity * fill.price) / total
+            )
+        else:
+            closing = min(abs(old_qty), fill.quantity)
+            if old_qty > 0:
+                realised = closing * (fill.price - position.avg_price)
+            else:
+                realised = closing * (position.avg_price - fill.price)
+            position.realized_pnl += realised
+            self.realized_pnl += realised
+
+            if abs(new_qty) < _EPS:
+                position.avg_price = 0.0
+                new_qty = 0.0
+            elif (new_qty > 0) != (old_qty > 0):
+                position.avg_price = fill.price
+
+        position.quantity = new_qty
+        notional = fill.quantity * fill.price
+        self.cash += (-notional if fill.side == "buy" else notional) - fill.commission
+        self.total_commission += fill.commission
+        self.fills.append(fill)
+
+    def restore(self) -> int:
+        """Rebuild cash, positions and fills from the store (idempotent)."""
+        if self._store is None or self.fills:
+            return len(self.fills)
+        for fill in self._store.load_fills():
+            self._book(fill)
+        return len(self.fills)
 
     # ------------------------------------------------------------------
     # Valuation

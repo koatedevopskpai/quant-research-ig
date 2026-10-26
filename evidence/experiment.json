@@ -1,0 +1,103 @@
+{
+  "experiment": "momentum-lookback-holdout",
+  "revision": "e29138b",
+  "seed": 20261026,
+  "dataset": {
+    "n_observations": 1512,
+    "digest": "3d2f20a8f4222492",
+    "start": "2020-01-01",
+    "end": "2025-10-16",
+    "synthetic": true
+  },
+  "splits": {
+    "train_end": "2023-06-22",
+    "validation_end": "2024-08-19",
+    "holdout_start": "2024-08-20",
+    "holdout_observations": 303
+  },
+  "selection": {
+    "lookback": 5,
+    "selection_sharpe": 0.7482600034997571,
+    "grid": [
+      5,
+      10,
+      20,
+      40
+    ]
+  },
+  "holdout": {
+    "strategy": {
+      "total_return": 0.049365709868634866,
+      "annualised_return": 0.040889252705811785,
+      "annualised_volatility": 0.24224463442013583,
+      "sharpe_ratio": 0.28575346576290234,
+      "max_drawdown": -0.22841924943772762,
+      "turnover_trades": 63,
+      "observations": 303,
+      "cost_bps": 2.0
+    },
+    "benchmark": {
+      "total_return": 0.18461142900573035,
+      "annualised_return": 0.15130887606566046,
+      "annualised_volatility": 0.24108314132376998,
+      "sharpe_ratio": 0.7041231927905377,
+      "max_drawdown": -0.20298545461432338,
+      "turnover_trades": 0,
+      "observations": 303,
+      "cost_bps": 2.0
+    }
+  },
+  "promotion": {
+    "gates": {
+      "positive_sharpe": true,
+      "beats_benchmark": false,
+      "psr": false,
+      "dsr": false,
+      "monkey_test": false,
+      "drawdown_within_limit": true
+    },
+    "detail": {
+      "psr": 0.623167624266166,
+      "dsr": 0.5153289395836189,
+      "expected_max_sharpe": 0.25075632266655634,
+      "monkey_p_value": 0.5814185814185814,
+      "n_trials": 4,
+      "thresholds": {
+        "psr": 0.95,
+        "dsr": 0.95,
+        "monkey_p": 0.05,
+        "max_drawdown": 0.25
+      }
+    },
+    "promoted": false
+  },
+  "config": {
+    "seed": 20261026,
+    "years": 6,
+    "start_price": 100.0,
+    "cost_bps": 2.0,
+    "lookbacks": [
+      5,
+      10,
+      20,
+      40
+    ],
+    "train_fraction": 0.6,
+    "validation_fraction": 0.2,
+    "psr_threshold": 0.95,
+    "dsr_threshold": 0.95,
+    "monkey_p_threshold": 0.05,
+    "max_drawdown_threshold": 0.25
+  },
+  "environment": {
+    "python": "3.12.15",
+    "numpy": "2.5.4",
+    "pandas": "3.1.0",
+    "platform": "Windows-11-10.0.26300-SP0"
+  },
+  "limitations": [
+    "Dataset is synthetic and fixed by seed; this demonstrates a reproducible method, not a market edge.",
+    "A single chronological holdout is one sample; the gate can pass by luck. Phase-2 CPCV/WFA exist for a broader assessment.",
+    "No slippage model beyond a flat bps cost; no borrow/financing."
+  ]
+}

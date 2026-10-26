@@ -69,8 +69,8 @@ reducing orders are still allowed after a halt, while new risk is refused.
 
 ## Known limitations (phase 8)
 
-- **No persistence.** Ledger, risk and audit state are in memory; a restart loses
-  the day. Replay is reproducible, but its output is not stored.
+- **No persistence** — resolved after this phase: orders, fills, audit and risk
+  state now survive a restart in SQLite. See [`persistence.md`](persistence.md).
 - **WebSocket auth uses a header**, which browsers cannot set on a WebSocket
   handshake. A shared browser deployment needs a query-token or session flow.
 - **No rate limiting or TLS.** Terminate TLS and rate-limit at a reverse proxy.

@@ -90,13 +90,16 @@ MIN_SIGNAL_CONFIDENCE = 0.10
 
 
 class ProductionRunner:
-    def __init__(self) -> None:
+    def __init__(self, persist: bool = False) -> None:
         logger.info("Initialising production runner")
         self._running = False
 
         # Infrastructure
+        from agentic_finance.persistence import default_store
+
+        self._store = default_store() if persist else None
         self.message_bus = MessageBus()
-        self.audit_trail = AuditTrail()
+        self.audit_trail = AuditTrail(store=self._store)
 
         # Epics
         self.epics = list(EPICS)
@@ -119,11 +122,11 @@ class ProductionRunner:
         self.research_agent = ResearchAgent(self.message_bus, self.audit_trail)
         self.execution_agent = ExecutionAgent(
             self.message_bus, self.audit_trail,
-            initial_capital=INITIAL_CAPITAL,
+            initial_capital=INITIAL_CAPITAL, store=self._store,
         )
         self.risk_manager = RiskManager(
             self.message_bus, self.audit_trail,
-            initial_capital=INITIAL_CAPITAL,
+            initial_capital=INITIAL_CAPITAL, store=self._store,
         )
         self.portfolio_agent = PortfolioAgent(
             self.message_bus, self.audit_trail,
@@ -133,6 +136,15 @@ class ProductionRunner:
         # Timing state
         self._last_research_time: float = 0.0
         self._last_risk_check_time: float = 0.0
+
+        if self._store is not None:
+            restored = self.execution_agent.restore()
+            self.audit_trail.restore()
+            logger.info(
+                "Restored state: %d fills, %d orders, %d audit entries, halted=%s",
+                restored, len(self.execution_agent.orders),
+                self.audit_trail.count(), self.risk_manager.is_halted,
+            )
 
     # ── Setup ───────────────────────────────────────────────────────
 
@@ -453,7 +465,10 @@ class ProductionRunner:
 
 
 def main() -> NoReturn:
-    runner = ProductionRunner()
+    import os
+
+    persist = os.environ.get("QUANT_PERSIST", "1") != "0"
+    runner = ProductionRunner(persist=persist)
     try:
         runner.run()
     except Exception as e:
