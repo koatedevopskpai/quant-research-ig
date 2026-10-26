@@ -124,7 +124,7 @@ class TestTickLoop:
         mock_pipeline._price_caches[mock_pipeline.epics[0]] = [100.0] * 100  # enough for the 50-point threshold
         mock_pipeline._last_research_time = -9999  # force run
         mock_pipeline._tick_loop()
-        mock_pipeline.research_agent.research.assert_called()
+        mock_pipeline.research_agent.research_signal.assert_called()
 
     def test_tick_loop_runs_risk_check(self, mock_pipeline):
         mock_pipeline.books[mock_pipeline.epics[0]].l1_snapshot.return_value = MagicMock(
@@ -135,7 +135,7 @@ class TestTickLoop:
         mock_pipeline.risk_manager.check_risk.assert_called()
 
     def test_tick_loop_research_catches_exception(self, mock_pipeline):
-        mock_pipeline.research_agent.research.side_effect = RuntimeError("fail")
+        mock_pipeline.research_agent.research_signal.side_effect = RuntimeError("fail")
         mock_pipeline.books[mock_pipeline.epics[0]].l1_snapshot.return_value = MagicMock(
             mid_price=100.0,
         )

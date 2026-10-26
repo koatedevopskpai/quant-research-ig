@@ -54,6 +54,9 @@ class TestApiResearch:
         assert data["model_type"] == "regime"
         assert "model_output" in data
         assert "summary" in data
+        # Regime context only: no direction, and clearly labelled as demo data.
+        assert data["model_output"]["direction"] == 0.0
+        assert data["model_output"]["diagnostics"]["demo"] is True
 
     def test_run_forecast(self):
         resp = client.post("/research/TEST", json={
@@ -63,7 +66,11 @@ class TestApiResearch:
         assert resp.status_code == 200
         data = resp.json()
         assert data["model_type"] == "forecast"
-        assert "prediction_mean" in data["model_output"]
+        # The old response exposed "prediction_mean"; the contract exposes a
+        # direction and a confidence, plus an explicit demo marker.
+        assert data["model_output"]["direction"] in (-1.0, 0.0, 1.0)
+        assert 0.0 <= data["model_output"]["confidence"] <= 1.0
+        assert data["model_output"]["diagnostics"]["demo"] is True
 
     def test_invalid_model(self):
         resp = client.post("/research/TEST", json={

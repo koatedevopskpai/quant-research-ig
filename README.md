@@ -24,7 +24,7 @@ is actually demonstrated versus merely intended.
 | **1. Reproducible baseline** | supported interpreter, locked dependencies, credential-free install and collection, CI | **Complete** | [`docs/phase-1-baseline.md`](docs/phase-1-baseline.md) |
 | **2. Correct statistical validation** | PSR/DSR units and moments, look-ahead removal, model fitting inside purged CPCV / walk-forward folds | **Complete on this branch** ([PR #2](https://github.com/koatedevopskpai/quant-research-ig/pull/2)) | [`docs/phase-2-validation.md`](docs/phase-2-validation.md) |
 | **3. Market-data handling** | Lightstreamer callback and field mapping, L1 vs L2 semantics, per-instrument state isolation, opening prices, timestamps | **Complete** for the provider-neutral pipeline; IG live verification deferred | [`docs/phase-3-market-data.md`](docs/phase-3-market-data.md) |
-| **4. Research model contracts** | typed model input/output adapters, HMM/XGBoost registration, explicit regime → direction/confidence policy | Planned | — |
+| **4. Research model contracts** | typed model input/output adapters, HMM/XGBoost registration, explicit regime → direction/confidence policy | **Complete** — promotion gates remain phase 8 | [`docs/phase-4-models.md`](docs/phase-4-models.md) |
 | **5. Paper execution** | order IDs, lifecycle states, simulated fills, position ledger, reductions/exits/reversals/partials, stop and target handling | Planned | — |
 | **6. Risk controls** | P&L and exposure from the ledger, daily reset and capital updates, idempotent halt/resume, enforcement on every path | Planned | — |
 | **7. Security and replay** | loopback-by-default API, authentication for shared deployments, restricted bus publication, deterministic end-to-end replay | Planned | — |
@@ -124,8 +124,8 @@ MSVC 19.51 for the C++ job. No `.env`, IG session, database or LLM key.
 |---|---|
 | `uv run --locked python scripts/check_baseline.py` | all five distributions import |
 | `uv run --locked python scripts/check_validation.py` | published DSR reference `0.9003968344` |
-| `uv run --locked pytest` | **522 passed**, 24 skipped (C++ extension unbuilt) |
-| `uv run --locked pytest` after `build_cpp` | **546 passed**, 0 skipped |
+| `uv run --locked pytest` | **530 passed**, 24 skipped (C++ extension unbuilt) |
+| `uv run --locked pytest` after `build_cpp` | **554 passed**, 0 skipped |
 
 | Module | Tests |
 |---|---|
@@ -133,7 +133,7 @@ MSVC 19.51 for the C++ job. No `.env`, IG session, database or LLM key.
 | `quant-methods` | 128 |
 | `hft-engine` | 157 (24 need the compiled extension) |
 | `ml-for-finance` | 25 |
-| `agentic-finance` | 173 |
+| `agentic-finance` | 181 |
 
 Live read-only provider checks (see [`docs/phase-3-market-data.md`](docs/phase-3-market-data.md)):
 Binance `BTCUSDT` delivered 5,453 L2 events and 676 trades in 15 s. IG is
@@ -290,7 +290,7 @@ strategy has yet been promoted through them end to end (phase 8).
 | `quant-methods` | 1–2 | Pricing, GARCH, portfolio optimisation, and the reference-tested validation suite. |
 | `hft-engine` | 1–2 | Python book/feeds/microstructure plus a compiled C++ accelerator: order book, tick parsers, toxicity detector, execution/colocation/latency/market-sim. |
 | `ml-for-finance` | 2 | HMM regimes, XGBoost with chronological partitions, LSTM, sentiment models. Temporal leakage removed. |
-| `agentic-finance` | 1 | Four agents, MessageBus, AuditTrail, FastAPI REST + WebSocket API, Streamlit and terminal dashboards. Execution accounting and risk wiring are not reconciled (phases 5–6). |
+| `agentic-finance` | 1, 4 | Four agents, MessageBus, AuditTrail, FastAPI REST + WebSocket API, Streamlit and terminal dashboards. Research models are registered through validated adapters. Execution accounting and risk wiring are not reconciled (phases 5–6). |
 
 ---
 
@@ -311,10 +311,13 @@ phases 1–2. Each is assigned to the phase that will fix it.
   price history per EPIC and routes on `msg.epic`.
 - **Ingestion** *(fixed)* — opening prices come from `openPrice` (not close), and
   timestamps are normalised to timezone-aware UTC, preferring `snapshotTimeUTC`.
-- **Model contracts** *(phase 4)* — no models are registered by the runner, the
-  HMM adapter calls `predict()` without `X`, the XGBoost adapter reads a
-  non-existent `forecast` attribute, and regime labels are names where numeric
-  states are assumed. Confidence therefore collapses to zero.
+- **Model contracts** *(fixed)* — the runner registers real adapters, HMM and
+  XGBoost results are translated through a validated `ModelOutput`, and
+  direction/confidence come from a forecast rather than a regime label. The
+  API's stub models are marked `diagnostics["demo"] = True`.
+- **Signal provenance** *(phase 8)* — models are refit on the recent window and
+  the last in-sample forecast is used, so no walk-forward promotion gate stands
+  between a signal and an order yet.
 - **Execution accounting** *(phase 5)* — holdings update on order creation, not
   on fill; orders carry no ID or lifecycle; position limits computed from
   absolute holdings block risk-reducing exits.

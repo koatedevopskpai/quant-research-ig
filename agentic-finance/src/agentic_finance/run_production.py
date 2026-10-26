@@ -69,7 +69,8 @@ from hft_engine.toxicity.detector import ToxicityDetector
 from hft_engine.execution.simulator import ExecutionSimulator
 
 # ── Agents ──────────────────────────────────────────────────────────
-from agentic_finance.research_agent import ResearchAgent, ResearchRequest
+from agentic_finance.research_agent import ResearchAgent
+from agentic_finance.model_adapters import ForecastAdapter, RegimeAdapter
 from agentic_finance.execution_agent import ExecutionAgent, Signal
 from agentic_finance.risk_manager import RiskManager
 from agentic_finance.portfolio_agent import PortfolioAgent
@@ -83,6 +84,9 @@ EPICS = [
 RESEARCH_INTERVAL = 300      # seconds (5 min)
 RISK_CHECK_INTERVAL = 60     # seconds (1 min)
 INITIAL_CAPITAL = 100_000.0
+# Below this, a research signal is logged but not turned into an order. Without
+# a floor, a forecast indistinguishable from noise still trades at ~zero size.
+MIN_SIGNAL_CONFIDENCE = 0.10
 
 
 class ProductionRunner:
@@ -143,6 +147,12 @@ class ProductionRunner:
         # Wire agents to ExecutionAgent for toxicity + impact checks
         self.execution_agent.set_toxicity_detector(self.toxicity)
         self.execution_agent.set_execution_simulator(self.execution_sim)
+
+        # Register the real research models. Adapters import the ML packages
+        # lazily, so this stays cheap; a missing dependency fails here with a
+        # clear message instead of silently producing zero predictions.
+        self.research_agent.register_model("forecast", ForecastAdapter())
+        self.research_agent.register_model("regime", RegimeAdapter())
 
         # Register strategies on portfolio agent
         self.portfolio_agent.register_strategy(
@@ -222,12 +232,30 @@ class ProductionRunner:
             return
 
         price = l1.mid_price
-        direction = 1.0 if output.get("regime_labels", [0])[-1] == 1 else -1.0
-        confidence = min(1.0, abs(output.get("prediction_mean", 0)) / 0.02)
+
+        # The signal policy is defined once, in the research agent: direction
+        # comes from a return forecast, confidence from its magnitude (halved in
+        # the highest-volatility regime). A regime label is never parsed into a
+        # direction, which is what previously made every signal a coin flip.
+        try:
+            direction = float(output.get("direction", 0.0))
+            confidence = float(output.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            logger.warning("Malformed research output for %s: %s", epic, output)
+            return
+
+        if direction == 0.0:
+            logger.info("No directional view for %s (regime=%s)",
+                        epic, output.get("regime_label"))
+            return
+        if confidence < MIN_SIGNAL_CONFIDENCE:
+            logger.info("Signal for %s below confidence floor (%.3f < %.2f)",
+                        epic, confidence, MIN_SIGNAL_CONFIDENCE)
+            return
 
         signal = Signal(
             epic=epic, direction=direction, confidence=confidence,
-            source=payload.get("model_type", "research"),
+            source=f"research:{output.get('regime_label') or 'signal'}",
         )
         order = self.execution_agent.process_signal(signal, price)
         if order is not None:
@@ -246,16 +274,26 @@ class ProductionRunner:
     def _run_research(self) -> None:
         """Run ML research on the latest market data."""
         import numpy as np
+        import pandas as pd
 
         researched = 0
         for epic in self.epics:
             cache = self._price_caches[epic]
             if len(cache) < 50:
                 continue
-            prices = np.array(cache)
-            request = ResearchRequest(epic=epic, model_type="regime")
-            result = self.research_agent.research(request, prices)
-            logger.info("Research complete for %s: %s", epic, result.summary[:100])
+
+            # Models require a unique, increasing DatetimeIndex and positive
+            # prices. The cache is a bare list of last-traded prices, so attach
+            # a synthetic minute index; inference uses the return series, not
+            # the calendar labels.
+            index = pd.date_range(
+                end=pd.Timestamp.now(tz="UTC").normalize(),
+                periods=len(cache), freq="min",
+            )
+            prices = pd.Series(np.asarray(cache, dtype=float), index=index)
+
+            result = self.research_agent.research_signal(epic, prices)
+            logger.info("Research signal for %s: %s", epic, str(result.summary)[:160])
             researched += 1
 
         if researched == 0:

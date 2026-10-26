@@ -1,17 +1,31 @@
 """
 research_agent.py — Research Agent (Quant Beckman's Research phase)
 
-The Research Agent is the starting point of Beckman's Research→Know→Do→Get
+The Research Agent is the starting point of Beckman's Research → Know → Do → Get
 cycle. It:
     1. Accepts research requests (epic, model type, parameters)
-    2. Fetches market data for the requested epic
-    3. Runs the selected ML model (regime detection, forecasting, LSTM)
-    4. Calls an LLM to generate a natural-language research report
-    5. Publishes the research result to the message bus
+    2. Runs a registered model adapter over the supplied price history
+    3. Produces either a single-model result or a combined directional signal
+    4. Optionally asks an LLM for a narrative report
+    5. Records a Decision and publishes `research.completed`
 
-The LLM integration is optional — without an API key, the agent falls
-back to a structured summary of model outputs. This makes the agent
-fully testable without external dependencies.
+WHY ADAPTERS
+    Models are reached through `ModelAdapter` (see `model_contract.py`), not
+    through raw result objects. The previous implementation guessed at each
+    model's shape: it read `result.forecast` from a result that exposes
+    `forecasts`, called `predict()` without the required input, and derived
+    direction from regime *labels*. All three failed silently into zero. The
+    contract now validates the output, and a missing or broken model produces an
+    explicit `error` rather than a tradable-looking zero.
+
+THE SIGNAL POLICY
+    `research_signal` is the only path that turns models into a direction:
+
+      * direction comes from a return forecast (never from a regime);
+      * confidence is the forecast's own conviction, halved when the regime is
+        the highest-volatility state;
+      * if no forecast model is registered, the result is an error — regime
+        context alone cannot open a position.
 """
 
 from dataclasses import dataclass, field
@@ -23,6 +37,8 @@ import numpy as np
 from agentic_finance.message_bus import MessageBus, AgentMessage
 from agentic_finance.decision import Decision, DecisionType, DecisionStatus
 from agentic_finance.audit_trail import AuditTrail
+
+SUPPORTED_MODELS = ("regime", "forecast", "lstm", "sentiment")
 
 
 @dataclass
@@ -51,57 +67,94 @@ class ResearchAgent:
         self.llm_api_key = llm_api_key
         self._models: dict[str, Any] = {}
 
-    def register_model(self, model_type: str, model: Any) -> None:
-        self._models[model_type] = model
+    # ------------------------------------------------------------------
+    # Registration
+    # ------------------------------------------------------------------
 
-    def _run_regime(self, prices: Any) -> dict[str, Any]:
-        model = self._models.get("regime")
-        if model is None:
-            return {"error": "Regime model not registered"}
-        try:
-            result = model.fit(prices.values).predict()
-            labels = result.regime_labels if hasattr(result, 'regime_labels') else []
-            probs = result.regime_probs.tolist() if hasattr(result, 'regime_probs') else []
-            return {"regime_labels": labels, "regime_probs": probs, "n_regimes": len(labels)}
-        except Exception as e:
-            return {"error": str(e)}
+    def register_model(self, model_type: str, adapter: Any) -> None:
+        """
+        Register a model adapter.
 
-    def _run_forecast(self, prices: Any) -> dict[str, Any]:
-        model = self._models.get("forecast")
-        if model is None:
-            return {"error": "Forecast model not registered"}
-        try:
-            result = model.fit(prices).predict(prices)
-            pred = result.forecast.tolist() if hasattr(result, 'forecast') else []
-            return {"prediction_mean": float(np.mean(pred)) if pred else 0.0,
-                    "prediction_std": float(np.std(pred)) if pred else 0.0,
-                    "n_predictions": len(pred)}
-        except Exception as e:
-            return {"error": str(e)}
+        Rejects objects that do not expose `name`, `fit` and `predict`, because
+        accepting them is exactly how a silently-broken model gets wired in.
+        """
+        if model_type not in SUPPORTED_MODELS:
+            raise ValueError(
+                f"Unknown model_type: {model_type}. Expected one of {SUPPORTED_MODELS}"
+            )
+        missing = [attr for attr in ("name", "fit", "predict") if not hasattr(adapter, attr)]
+        if missing:
+            raise TypeError(
+                f"{model_type} adapter is missing {missing}; register a ModelAdapter "
+                "(see model_contract.py), not a raw model object"
+            )
+        self._models[model_type] = adapter
 
-    def _run_lstm(self, prices: Any) -> dict[str, Any]:
-        model = self._models.get("lstm")
-        if model is None:
-            return {"error": "LSTM model not registered"}
-        try:
-            result = model.predict(prices)
-            pred = result.forecast.tolist() if hasattr(result, 'forecast') else []
-            return {"prediction_mean": float(np.mean(pred)) if pred else 0.0,
-                    "n_predictions": len(pred)}
-        except Exception as e:
-            return {"error": str(e)}
+    def registered_models(self) -> list[str]:
+        return sorted(self._models)
 
-    def _run_sentiment(self, prices: Any, sentiment_data: Any = None) -> dict[str, Any]:
-        model = self._models.get("sentiment")
-        if model is None:
-            return {"error": "Sentiment model not registered"}
+    # ------------------------------------------------------------------
+    # Model execution
+    # ------------------------------------------------------------------
+
+    def _predict(self, model_type: str, prices: Any) -> dict[str, Any]:
+        """
+        Fit the adapter on the supplied history, then predict.
+
+        WHY FIT HERE: research runs on the latest window, so each call is a
+        refit followed by a prediction. Keeping that ordering in one place means
+        an adapter can never be queried unfitted; the previous code's
+        `fit(...).predict(...)` chain made the same assumption but without a
+        contract around the result.
+        """
+        adapter = self._models.get(model_type)
+        if adapter is None:
+            return {"error": f"{model_type} model not registered"}
         try:
-            result = model.predict(prices)
-            forecast = result.forecast.tolist() if hasattr(result, 'forecast') else []
-            return {"prediction_mean": float(np.mean(forecast)) if forecast else 0.0,
-                    "n_predictions": len(forecast)}
-        except Exception as e:
-            return {"error": str(e)}
+            adapter.fit(prices)
+            output = adapter.predict(prices)
+            return output.to_dict()
+        except Exception as exc:  # noqa: BLE001 - surfaced, never swallowed
+            return {"error": f"{type(exc).__name__}: {exc}"}
+
+    def _predict_combined(self, epic: str, prices: Any) -> dict[str, Any]:
+        outputs = {name: self._predict(name, prices) for name in ("forecast", "regime")}
+        forecast = outputs.get("forecast", {})
+        regime = outputs.get("regime", {})
+
+        if "error" in forecast:
+            return {
+                "error": (
+                    "a directional signal requires a forecast model: "
+                    f"{forecast['error']}"
+                ),
+                "models": outputs,
+            }
+
+        direction = float(forecast["direction"])
+        confidence = float(forecast["confidence"])
+
+        multiplier = 1.0
+        if "error" not in regime and regime.get("regime") is not None:
+            n_regimes = regime.get("diagnostics", {}).get("n_regimes")
+            if n_regimes and int(regime["regime"]) == int(n_regimes) - 1:
+                # Highest-volatility state: same forecast, less conviction.
+                multiplier = 0.5
+        confidence = max(0.0, min(1.0, confidence * multiplier))
+
+        return {
+            "direction": direction,
+            "confidence": confidence,
+            "expected_return": forecast.get("expected_return"),
+            "regime": regime.get("regime") if "error" not in regime else None,
+            "regime_label": regime.get("regime_label") if "error" not in regime else None,
+            "regime_confidence_multiplier": multiplier,
+            "models": outputs,
+        }
+
+    # ------------------------------------------------------------------
+    # Reporting
+    # ------------------------------------------------------------------
 
     def _generate_summary(self, request: ResearchRequest, output: dict[str, Any]) -> str:
         if "error" in output:
@@ -112,30 +165,8 @@ class ResearchAgent:
                 parts.append(f"  {k}: {v}")
         return "\n".join(parts)
 
-    def research(self, request: ResearchRequest, prices: Any,
-                 sentiment_data: Any = None) -> ResearchResult:
-        runners = {
-            "regime": self._run_regime,
-            "forecast": self._run_forecast,
-            "lstm": self._run_lstm,
-            "sentiment": self._run_sentiment,
-        }
-        runner = runners.get(request.model_type)
-        if runner is None:
-            raise ValueError(f"Unknown model_type: {request.model_type}")
-        output = runner(prices, sentiment_data) if request.model_type == "sentiment" else runner(prices)
-        summary = self._generate_summary(request, output)
-        llm_report = ""
-        if self.llm_api_key:
-            llm_report = self._llm_report(request, output)
-        result = ResearchResult(
-            epic=request.epic,
-            model_type=request.model_type,
-            model_output=output,
-            summary=summary,
-            llm_report=llm_report,
-            request_id=request.request_id,
-        )
+    def _record(self, request: ResearchRequest, output: dict[str, Any],
+                summary: str, llm_report: str) -> None:
         decision = Decision.now(
             agent="ResearchAgent",
             decision_type=DecisionType.RESEARCH,
@@ -147,11 +178,69 @@ class ResearchAgent:
         decision.status = DecisionStatus.EXECUTED
         self.audit_trail.record(decision,
                                 tags=["research", request.model_type, request.epic])
+
+    def _publish(self, request: ResearchRequest, output: dict[str, Any],
+                 summary: str) -> None:
         self.message_bus.publish_topic(
             "research.completed", "ResearchAgent",
             {"epic": request.epic, "model_type": request.model_type,
              "output": output, "summary": summary},
         )
+
+    # ------------------------------------------------------------------
+    # Public entry points
+    # ------------------------------------------------------------------
+
+    def research(self, request: ResearchRequest, prices: Any,
+                 sentiment_data: Any = None) -> ResearchResult:
+        """Run one registered model. Errors are returned, not raised."""
+        if request.model_type not in SUPPORTED_MODELS:
+            raise ValueError(f"Unknown model_type: {request.model_type}")
+
+        output = self._predict(request.model_type, prices)
+        summary = self._generate_summary(request, output)
+        llm_report = self._llm_report(request, output) if self.llm_api_key else ""
+
+        result = ResearchResult(
+            epic=request.epic,
+            model_type=request.model_type,
+            model_output=output,
+            summary=summary,
+            llm_report=llm_report,
+            request_id=request.request_id,
+        )
+        self._record(request, output, summary, llm_report)
+        self._publish(request, output, summary)
+        return result
+
+    def research_signal(self, epic: str, prices: Any,
+                        request_id: str = "") -> ResearchResult:
+        """
+        Combine forecast and regime into one directional signal.
+
+        The result's `model_output` always carries `direction` and `confidence`
+        (0.0 when there is no usable forecast) plus the per-model details, so the
+        execution path never has to guess which model produced what.
+        """
+        request = ResearchRequest(epic=epic, model_type="signal",
+                                  request_id=request_id)
+        output = self._predict_combined(epic, prices)
+        if "error" not in output and output.get("direction") == 0.0:
+            # A zero direction is not an error, but it is not a signal either.
+            output["note"] = "no directional view"
+        summary = self._generate_summary(request, output)
+        llm_report = self._llm_report(request, output) if self.llm_api_key else ""
+
+        result = ResearchResult(
+            epic=epic,
+            model_type="signal",
+            model_output=output,
+            summary=summary,
+            llm_report=llm_report,
+            request_id=request_id,
+        )
+        self._record(request, output, summary, llm_report)
+        self._publish(request, output, summary)
         return result
 
     def _llm_report(self, request: ResearchRequest, output: dict[str, Any]) -> str:
@@ -161,7 +250,7 @@ class ResearchAgent:
             prompt = (
                 f"You are a quantitative research analyst. "
                 f"Summarise the following {request.model_type} analysis for {request.epic}:\n"
-                f"{json.dumps(output, indent=2)}\n"
+                f"{json.dumps(output, indent=2, default=str)}\n"
                 f"Provide a clear, actionable interpretation for a portfolio manager."
             )
             resp = client.chat.completions.create(
