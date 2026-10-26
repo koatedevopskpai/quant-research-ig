@@ -558,6 +558,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "sqlalchemy" },
+    { name = "websockets" },
 ]
 
 [package.optional-dependencies]
@@ -579,6 +580,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
     { name = "sqlalchemy", specifier = ">=2.0" },
+    { name = "websockets", specifier = ">=13" },
 ]
 provides-extras = ["dev"]
 

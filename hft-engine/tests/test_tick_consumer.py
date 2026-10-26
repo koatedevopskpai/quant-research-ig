@@ -300,3 +300,42 @@ class TestTickConsumer:
         consumer.subscribe("EPIC_A", callback)
         consumer._on_l1_update("MARKET:EPIC_B", {"Bid": "100"})
         assert len(received) == 0
+
+class TestFieldCasing:
+    """Regression: IG emits both "Ltp" and "LTP"; both must reach the parser.
+
+    The live repro in the 2026-10 review fed {'LTP': '105', 'LTV': '12'} and got
+    last_price = 0.0, last_size = 0.0 because str.capitalize() produced "Ltp".
+    """
+
+    def test_uppercase_fields_are_canonicalised(self) -> None:
+        from hft_engine.feeds.tick_consumer import _canonical_fields
+
+        assert _canonical_fields({"LTP": "105", "LTV": "12", "OFR": "1.2"}) == {
+            "Last": "105",
+            "LastSize": "12",
+            "Offer": "1.2",
+        }
+
+    def test_uppercase_tick_does_not_parse_to_zero(self) -> None:
+        received: list[MarketDataMessage] = []
+        consumer = TickConsumer()
+        consumer.subscribe("EPIC", received.append)
+        consumer._on_tick_update("CHART:EPIC:TICK", {"LTP": "105", "LTV": "12"})
+        assert received[0].last_price == 105.0
+        assert received[0].last_size == 12.0
+
+    def test_mixed_case_tick_still_works(self) -> None:
+        received: list[MarketDataMessage] = []
+        consumer = TickConsumer()
+        consumer.subscribe("EPIC", received.append)
+        consumer._on_tick_update("CHART:EPIC:TICK", {"Ltp": "105", "Ltv": "12"})
+        assert received[0].last_price == 105.0
+
+    def test_uppercase_l1_offer_is_read(self) -> None:
+        received: list[MarketDataMessage] = []
+        consumer = TickConsumer()
+        consumer.subscribe("EPIC", received.append)
+        consumer._on_l1_update("MARKET:EPIC", {"BID": "1.1000", "OFR": "1.1002"})
+        assert received[0].bid_price == 1.10
+        assert received[0].ask_price == 1.1002
