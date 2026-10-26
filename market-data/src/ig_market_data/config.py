@@ -5,7 +5,7 @@ WHY THIS EXISTS:
     Every module in this project needs IG API credentials and database
     connection parameters. Rather than hardcoding these values or requiring
     users to set them in every terminal session, we load them from a .env
-    file once, validate them at import time, and expose them through typed
+    file once, validate credentials when connecting, and expose them through typed
     settings objects.
 
 WHY A .env FILE:
@@ -24,7 +24,6 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-
 # ---------------------------------------------------------------------------
 # .env auto-discovery
 # ---------------------------------------------------------------------------
@@ -41,7 +40,7 @@ from dotenv import load_dotenv
 #   the user runs: python -m ig_market_data.verify_ig
 #   from the repo root, market-data/, or any other directory.
 _start = Path(__file__).resolve()
-for _parent in [_start] + list(_start.parents):
+for _parent in [] if os.environ.get("QUANT_LOAD_DOTENV") == "0" else _start.parents:
     candidate = _parent / ".env"
     if candidate.is_file():
         load_dotenv(dotenv_path=candidate)
@@ -52,20 +51,28 @@ class IGSettings:
     """
     IG API connection settings loaded from environment variables.
 
-    WHY Pydantic is NOT used here (vs. standard practice):
-        Pydantic would add a dependency for a single config class. These
-        settings are validated at the point of use — if IG_API_KEY is missing,
-        os.environ[] raises a KeyError with a clear message at import time,
-        before any API calls are made.
+    Importing research and schema modules requires no credentials. Connection
+    entry points call validate_credentials() before creating provider sessions.
     """
 
-    # WHY os.environ["VAR"] (no default) vs. os.environ.get("VAR", "default"):
-    #   API key, username, and password are always required. Accessing via
-    #   bracket notation raises KeyError immediately if missing, preventing
-    #   cryptic 401 errors later during API calls.
-    api_key: str = os.environ["IG_API_KEY"]
-    username: str = os.environ["IG_USERNAME"]
-    password: str = os.environ["IG_PASSWORD"]
+    api_key: str = os.environ.get("IG_API_KEY", "")
+    username: str = os.environ.get("IG_USERNAME", "")
+    password: str = os.environ.get("IG_PASSWORD", "")
+
+    def validate_credentials(self) -> None:
+        missing = [
+            name
+            for name, value in (
+                ("IG_API_KEY", self.api_key),
+                ("IG_USERNAME", self.username),
+                ("IG_PASSWORD", self.password),
+            )
+            if not value.strip()
+        ]
+        if missing:
+            raise RuntimeError("Missing IG credentials: " + ", ".join(missing))
+        if self.account_type not in {"DEMO", "LIVE"}:
+            raise RuntimeError("IG_ACCOUNT_TYPE must be DEMO or LIVE")
 
     # WHY account_type defaults to DEMO:
     #   DEMO accounts use simulated funds — safe for development and testing.
@@ -131,10 +138,7 @@ class PGSettings:
             format ever changes (e.g., adding SSL parameters), only this file
             needs updating.
         """
-        return (
-            f"postgresql://{self.user}:{self.password}"
-            f"@{self.host}:{self.port}/{self.database}"
-        )
+        return f"postgresql://{self.user}:{self.password}@{self.host}:{self.port}/{self.database}"
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +147,6 @@ class PGSettings:
 # WHY module-level singletons:
 #   Most consumers need a single config instance. Creating them at module
 #   level ensures settings are loaded once at import time and shared across
-#   all consumers in a process. This also surfaces missing environment
-#   variables early — at import time, not at first use.
+#   all consumers in a process. Missing credentials are checked when connecting.
 ig_settings = IGSettings()
 pg_settings = PGSettings()

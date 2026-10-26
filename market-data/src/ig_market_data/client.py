@@ -80,6 +80,7 @@ class IGClient:
         #   Allows mocking settings in tests by patching the instance after
         #   construction, without affecting other modules that import config.
         self.settings = ig_settings
+        self.settings.validate_credentials()
 
         # WHY a single httpx.Client session:
         #   httpx.Client maintains a connection pool internally. Reusing it
@@ -354,4 +355,6 @@ class IGClient:
             long-lived singleton. __del__ provides a safety net. A future
             enhancement could add __enter__/__exit__ for use with 'with'.
         """
-        self._client.close()
+        client = getattr(self, "_client", None)
+        if client is not None:
+            client.close()

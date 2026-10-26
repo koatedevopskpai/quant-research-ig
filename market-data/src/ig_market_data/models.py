@@ -195,7 +195,7 @@ class Tick(Base):
 
     __tablename__ = "ticks"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
     epic = Column(String, nullable=False)
     utm = Column(BigInteger, nullable=False)  # Unix time in milliseconds
     bid = Column(Numeric(12, 5))
@@ -234,7 +234,7 @@ class Quote(Base):
 
     __tablename__ = "quotes"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
     epic = Column(String, nullable=False)
     ts = Column(DateTime(timezone=True), nullable=False)
     bid = Column(Numeric(12, 5))
@@ -242,7 +242,7 @@ class Quote(Base):
     bid_size = Column(Integer)
     ask_size = Column(Integer)
 
-    __table_args__ = (Index("idx_quotes_epic_ts", "epic", "ts"))
+    __table_args__ = (Index("idx_quotes_epic_ts", "epic", "ts"),)
 
 
 # =============================================================================

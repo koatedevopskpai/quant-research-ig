@@ -48,7 +48,7 @@ import signal
 import sys
 import time
 from datetime import datetime, timezone
-from typing import NoReturn
+from typing import Any, NoReturn
 
 logging.basicConfig(
     level=logging.INFO,
