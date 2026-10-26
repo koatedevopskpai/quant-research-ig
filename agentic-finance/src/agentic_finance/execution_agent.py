@@ -7,22 +7,32 @@ Downing's strategy conductor pattern:
     - Toxicity veto: reject signals when order flow is toxic
     - Multi-exit logic: take-profit, stop-loss, trailing stop
 
-It reads signals from the message bus, validates them against current
-risk constraints, sizes the position, and creates orders.
+WHAT CHANGED IN PHASE 5
+    Orders now have identities and lifecycle states, fills are simulated and
+    booked to a `PositionLedger`, and protective exits are actually consumed.
+    The previous version sized against `abs(holdings)`, so a full position could
+    never be reduced, and it mutated holdings when the *order* was created rather
+    than when it filled.
 
-The agent uses:
-    - Phase 3b ExecutionSimulator for market impact estimation
-    - Phase 3b ToxicityDetector for order-flow toxicity
-    - Phase 2b MicrostructureAnalyser for real-time market state
+SIZING IS AGAINST A SIGNED TARGET
+    target_quantity = direction x confidence x (equity x max_position_pct / price)
+    order_quantity  = target_quantity - current_quantity
+
+    That single change makes reductions, exits and reversals fall out naturally:
+    a sell that shrinks a long needs no extra "new risk" allowance.
 """
 
+from __future__ import annotations
+
+import uuid
 from dataclasses import dataclass, field
-from typing import Any, Optional
 from datetime import datetime, timezone
+from typing import Any, Optional
 
 from agentic_finance.message_bus import MessageBus, AgentMessage
 from agentic_finance.decision import Decision, DecisionType, DecisionStatus
 from agentic_finance.audit_trail import AuditTrail
+from agentic_finance.execution_ledger import Fill, PositionLedger
 
 
 @dataclass
@@ -34,10 +44,18 @@ class Order:
     limit_price: float | None = None
     stop_loss: float | None = None
     take_profit: float | None = None
-    order_id: str = ""
+    order_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     timestamp: Optional[datetime] = None
-    status: str = "pending"
+    status: str = "new"  # new | partially_filled | filled | rejected | cancelled
     reasoning: str = ""
+    filled_size: float = 0.0
+    avg_fill_price: float | None = None
+    fills: list[Fill] = field(default_factory=list)
+    reason: str = ""  # why the order exists: signal, stop_loss, take_profit
+
+    @property
+    def remaining(self) -> float:
+        return max(0.0, self.size - self.filled_size)
 
 
 @dataclass
@@ -54,17 +72,62 @@ class ExecutionAgent:
     def __init__(self, message_bus: MessageBus, audit_trail: AuditTrail,
                  initial_capital: float = 100_000.0,
                  max_position_pct: float = 0.05,
-                 default_stop_loss_pct: float = 0.02):
+                 default_stop_loss_pct: float = 0.02,
+                 commission_bps: float = 1.0,
+                 slippage_bps: float = 0.0,
+                 fill_ratio: float = 1.0,
+                 min_order_notional: float = 1.0):
         self.message_bus = message_bus
         self.audit_trail = audit_trail
         self.capital = initial_capital
         self.max_position_pct = max_position_pct
         self.default_stop_loss_pct = default_stop_loss_pct
-        self.positions: dict[str, float] = {}
+        self.fill_ratio = fill_ratio
+        self.min_order_notional = min_order_notional
+        if not 0 < fill_ratio <= 1:
+            raise ValueError("fill_ratio must be in (0, 1]")
+
+        self.ledger = PositionLedger(
+            initial_capital, commission_bps=commission_bps, slippage_bps=slippage_bps
+        )
+        self.orders: list[Order] = []
+        self._marks: dict[str, float] = {}
+        self._protective: dict[str, tuple[float | None, float | None]] = {}
         self._toxicity_detector: Any = None
         self._execution_sim: Any = None
         self._risk_constraints: dict[str, Any] = {}
         self._active = True
+
+    # ------------------------------------------------------------------
+    # State access
+    # ------------------------------------------------------------------
+
+    @property
+    def positions(self) -> dict[str, float]:
+        return {
+            epic: position.quantity
+            for epic, position in self.ledger.open_positions().items()
+        }
+
+    @property
+    def cash(self) -> float:
+        return self.ledger.cash
+
+    def equity(self, prices: dict[str, float] | None = None) -> float:
+        marks = dict(self._marks)
+        if prices:
+            marks.update(prices)
+        return self.ledger.equity(marks)
+
+    def reconcile(self, prices: dict[str, float] | None = None) -> dict[str, Any]:
+        marks = dict(self._marks)
+        if prices:
+            marks.update(prices)
+        return self.ledger.reconcile(marks)
+
+    # ------------------------------------------------------------------
+    # Wiring
+    # ------------------------------------------------------------------
 
     def set_toxicity_detector(self, detector: Any) -> None:
         self._toxicity_detector = detector
@@ -94,6 +157,10 @@ class ExecutionAgent:
         self._active = True
         self.message_bus.publish_topic("risk.kill", "ExecutionAgent", {"active": True})
 
+    # ------------------------------------------------------------------
+    # Signal handling
+    # ------------------------------------------------------------------
+
     def _check_toxicity(self, epic: str) -> tuple[bool, float]:
         if self._toxicity_detector is None:
             return True, 0.0
@@ -103,34 +170,35 @@ class ExecutionAgent:
         except Exception:
             return True, 0.0
 
-    def _estimate_impact(self, epic: str, side: str, size: float,
-                         price: float) -> dict[str, float]:
+    def _estimate_slippage_bps(self, side: str, size: float, price: float) -> tuple[float, str]:
         if self._execution_sim is None:
-            return {"total_cost_bps": 0.0, "slippage_bps": 0.0}
+            return 0.0, ""
         try:
             impact = self._execution_sim.simulate(size, side, price)
-            return {"total_cost_bps": impact.total_cost_bps,
-                    "slippage_bps": impact.slippage_bps}
+            return float(impact.slippage_bps), f"impact={impact.total_cost_bps:.2f}bps"
         except Exception:
-            return {"total_cost_bps": 0.0, "slippage_bps": 0.0}
+            return 0.0, ""
 
-    def _size_position(self, epic: str, price: float,
-                       confidence: float) -> tuple[float, str]:
-        max_notional = self.capital * self.max_position_pct
-        base_size = max_notional / price if price > 0 else 0.0
-        sized = base_size * abs(confidence)
-        current = abs(self.positions.get(epic, 0.0)) * price
-        remaining = max(0.0, max_notional - current)
-        final_size = min(sized, remaining / price) if price > 0 else 0.0
-        reasoning = (f"base={base_size:.0f}, confidence={confidence:.2f}, "
-                     f"current_pos_notional={current:.0f}, max={max_notional:.0f}")
-        return final_size, reasoning
+    def _target_order(self, epic: str, direction: float, confidence: float,
+                      price: float) -> tuple[str, float, float, float]:
+        equity = self.ledger.equity(self._marks)
+        max_notional = equity * self.max_position_pct
+        target_qty = direction * abs(confidence) * (max_notional / price) if price > 0 else 0.0
+        current_qty = self.ledger.positions.get(epic)
+        current_qty = current_qty.quantity if current_qty else 0.0
+        delta = target_qty - current_qty
+        side = "buy" if delta > 0 else "sell"
+        return side, abs(delta), target_qty, current_qty
 
     def process_signal(self, signal: Signal, current_price: float) -> Order | None:
         if not self._active:
             return None
         if signal.direction == 0 or signal.confidence <= 0:
             return None
+        if current_price <= 0:
+            return None
+
+        self._marks[signal.epic] = current_price
 
         toxicity_ok, tox_score = self._check_toxicity(signal.epic)
         if not toxicity_ok:
@@ -146,12 +214,17 @@ class ExecutionAgent:
             self.audit_trail.record(decision, tags=["execution", "toxicity_veto"])
             return None
 
-        side = "buy" if signal.direction > 0 else "sell"
-        size, sizing_reason = self._size_position(signal.epic, current_price, signal.confidence)
+        side, size, target_qty, current_qty = self._target_order(
+            signal.epic, signal.direction, signal.confidence, current_price
+        )
         if size <= 0:
             return None
+        # Commission changes equity by a hair, which otherwise produces
+        # micro-orders that only pay costs. Below a currency minimum, do nothing.
+        if size * current_price < self.min_order_notional:
+            return None
 
-        impact = self._estimate_impact(signal.epic, side, size, current_price)
+        slip_bps, impact_note = self._estimate_slippage_bps(side, size, current_price)
         stop_loss = (current_price * (1 - self.default_stop_loss_pct) if side == "buy"
                      else current_price * (1 + self.default_stop_loss_pct))
         take_profit = (current_price * (1 + self.default_stop_loss_pct * 2) if side == "buy"
@@ -164,28 +237,129 @@ class ExecutionAgent:
             order_type="market",
             stop_loss=stop_loss,
             take_profit=take_profit,
+            timestamp=datetime.now(timezone.utc),
             reasoning=(f"Signal from {signal.source}, dir={signal.direction:.2f}, "
-                       f"conf={signal.confidence:.2f}, {sizing_reason}, "
-                       f"impact={impact['total_cost_bps']:.2f}bps"),
+                       f"conf={signal.confidence:.2f}, target_qty={target_qty:.4f}, "
+                       f"current_qty={current_qty:.4f}, {impact_note}").strip(),
+            reason="signal",
         )
+        return self._submit(order, current_price, extra_slippage_bps=slip_bps)
+
+    # ------------------------------------------------------------------
+    # Order lifecycle
+    # ------------------------------------------------------------------
+
+    def _submit(self, order: Order, price: float, *, reason: str = "",
+                extra_slippage_bps: float = 0.0) -> Order:
+        order.timestamp = order.timestamp or datetime.now(timezone.utc)
+        order.reason = reason or order.reason
+        self.orders.append(order)
 
         decision = Decision.now(
             agent="ExecutionAgent",
             decision_type=DecisionType.ORDER,
-            description=f"Order {side} {size:.0f} {signal.epic} @ ~{current_price:.2f}",
-            context={"epic": signal.epic, "side": side, "size": size,
-                     "price": current_price, "impact_bps": impact["total_cost_bps"],
-                     "toxicity": tox_score},
+            description=f"Order {order.side} {order.size:.4f} {order.epic} @ ~{price:.2f}",
+            context={"order_id": order.order_id, "epic": order.epic,
+                     "side": order.side, "size": order.size, "price": price,
+                     "target": order.reason},
             reasoning=order.reasoning,
         )
         decision.status = DecisionStatus.EXECUTED
         self.audit_trail.record(decision, tags=["execution", "order"])
-        self.positions[signal.epic] = self.positions.get(signal.epic, 0.0) + size * (1 if side == "buy" else -1)
 
         self.message_bus.publish_topic(
             "order.created", "ExecutionAgent",
-            {"epic": signal.epic, "side": side, "size": size,
-             "price": current_price, "stop_loss": stop_loss,
-             "take_profit": take_profit},
+            {"order_id": order.order_id, "epic": order.epic, "side": order.side,
+             "size": order.size, "price": price,
+             "stop_loss": order.stop_loss, "take_profit": order.take_profit,
+             "reason": order.reason},
         )
+
+        self._fill(order, price, extra_slippage_bps=extra_slippage_bps)
         return order
+
+    def _fill(self, order: Order, price: float, *,
+              extra_slippage_bps: float = 0.0) -> Fill | None:
+        remaining = order.remaining
+        if remaining <= 0:
+            return None
+
+        # A fill_ratio below 1 simulates partial liquidity: each price event can
+        # consume another fraction of the original order size.
+        chunk = remaining if self.fill_ratio >= 1 else min(
+            remaining, order.size * self.fill_ratio
+        )
+        if chunk <= 0:
+            return None
+
+        fill = self.ledger.apply_fill(
+            order.epic, order.side, chunk, price,
+            order_id=order.order_id,
+            slippage_bps=self.ledger.slippage_bps + extra_slippage_bps,
+        )
+        order.filled_size += fill.quantity
+        notional_before = (order.avg_fill_price or 0.0) * (order.filled_size - fill.quantity)
+        order.avg_fill_price = (notional_before + fill.price * fill.quantity) / order.filled_size
+        order.fills.append(fill)
+        order.status = "filled" if order.remaining <= 1e-9 else "partially_filled"
+
+        self._marks[order.epic] = price
+        position = self.ledger.positions.get(order.epic)
+        if position and not position.is_flat:
+            # Remember the protective levels for the side actually held.
+            held_side = "buy" if position.quantity > 0 else "sell"
+            if order.side == held_side and order.stop_loss is not None:
+                self._protective[order.epic] = (order.stop_loss, order.take_profit)
+
+        self.message_bus.publish_topic(
+            "order.filled", "ExecutionAgent",
+            {"order_id": order.order_id, "fill_id": fill.fill_id,
+             "epic": order.epic, "side": order.side, "quantity": fill.quantity,
+             "price": fill.price, "commission": fill.commission,
+             "filled_size": order.filled_size, "status": order.status},
+        )
+        return fill
+
+    # ------------------------------------------------------------------
+    # Price updates: completion of partials, then protective exits
+    # ------------------------------------------------------------------
+
+    def on_price(self, epic: str, price: float) -> list[Order]:
+        if price <= 0:
+            return []
+        self._marks[epic] = price
+        triggered: list[Order] = []
+
+        for order in [o for o in self.orders
+                      if o.epic == epic and o.status == "partially_filled"]:
+            self._fill(order, price)
+            triggered.append(order)
+
+        position = self.ledger.positions.get(epic)
+        if position is None or position.is_flat:
+            return triggered
+
+        stop, take = self._protective.get(epic, (None, None))
+        if stop is None and take is None:
+            return triggered
+
+        long = position.quantity > 0
+        hit_stop = stop is not None and ((long and price <= stop) or (not long and price >= stop))
+        hit_take = take is not None and ((long and price >= take) or (not long and price <= take))
+        if not (hit_stop or hit_take):
+            return triggered
+
+        reason = "stop_loss" if hit_stop else "take_profit"
+        closing = Order(
+            epic=epic,
+            side="sell" if long else "buy",
+            size=abs(position.quantity),
+            order_type="market",
+            timestamp=datetime.now(timezone.utc),
+            reasoning=f"{reason} exit: price={price:.4f}, level={stop if hit_stop else take:.4f}",
+            reason=reason,
+        )
+        self._submit(closing, price, reason=reason)
+        self._protective.pop(epic, None)
+        triggered.append(closing)
+        return triggered
