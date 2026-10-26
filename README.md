@@ -27,7 +27,7 @@ is actually demonstrated versus merely intended.
 | **4. Research model contracts** | typed model input/output adapters, HMM/XGBoost registration, explicit regime → direction/confidence policy | **Complete** — promotion gates remain phase 8 | [`docs/phase-4-models.md`](docs/phase-4-models.md) |
 | **5. Paper execution** | order IDs, lifecycle states, simulated fills, position ledger, reductions/exits/reversals/partials, stop and target handling | **Complete** — risk integration remains phase 6 | [`docs/phase-5-execution.md`](docs/phase-5-execution.md) |
 | **6. Risk controls** | P&L and exposure from the ledger, daily reset and capital updates, idempotent halt/resume, enforcement on every path | **Complete** | [`docs/phase-6-risk.md`](docs/phase-6-risk.md) |
-| **7. Security and replay** | loopback-by-default API, authentication for shared deployments, restricted bus publication, deterministic end-to-end replay | Planned | — |
+| **7. Security and replay** | loopback-by-default API, authentication for shared deployments, restricted bus publication, deterministic end-to-end replay | **Complete** | [`docs/phase-7-security-replay.md`](docs/phase-7-security-replay.md) |
 | **8. Published research evidence** | one fixed experiment with costs, benchmark, chronological holdout, promotion gates, reproducible from the documented revision | Planned | — |
 
 ### Exit criteria
@@ -124,8 +124,8 @@ MSVC 19.51 for the C++ job. No `.env`, IG session, database or LLM key.
 |---|---|
 | `uv run --locked python scripts/check_baseline.py` | all five distributions import |
 | `uv run --locked python scripts/check_validation.py` | published DSR reference `0.9003968344` |
-| `uv run --locked pytest` | **567 passed**, 24 skipped (C++ extension unbuilt) |
-| `uv run --locked pytest` after `build_cpp` | **591 passed**, 0 skipped |
+| `uv run --locked pytest` | **589 passed**, 24 skipped (C++ extension unbuilt) |
+| `uv run --locked pytest` after `build_cpp` | **613 passed**, 0 skipped |
 
 | Module | Tests |
 |---|---|
@@ -133,7 +133,7 @@ MSVC 19.51 for the C++ job. No `.env`, IG session, database or LLM key.
 | `quant-methods` | 128 |
 | `hft-engine` | 157 (24 need the compiled extension) |
 | `ml-for-finance` | 25 |
-| `agentic-finance` | 218 |
+| `agentic-finance` | 240 |
 
 Live read-only provider checks (see [`docs/phase-3-market-data.md`](docs/phase-3-market-data.md)):
 Binance `BTCUSDT` delivered 5,453 L2 events and 676 trades in 15 s. IG is
@@ -198,6 +198,13 @@ provider = ReplayProvider.from_jsonl("fixtures/session.jsonl")
 provider.connect()
 provider.subscribe("CS.D.EURUSD.CFD.IP", "l1", print)
 provider.replay()          # speed=10 to pace by provider time
+```
+
+```bash
+# Full pipeline replay: data -> model -> signal -> fill -> P&L -> risk -> audit
+python -m agentic_finance.replay --steps 160
+python -m agentic_finance.replay --steps 160 --shock-after 60 --shock-pct 0.4 \
+    --daily-loss-limit 0.005 --stop-loss-pct 0.5
 ```
 
 ---
@@ -290,7 +297,7 @@ strategy has yet been promoted through them end to end (phase 8).
 | `quant-methods` | 1–2 | Pricing, GARCH, portfolio optimisation, and the reference-tested validation suite. |
 | `hft-engine` | 1–2 | Python book/feeds/microstructure plus a compiled C++ accelerator: order book, tick parsers, toxicity detector, execution/colocation/latency/market-sim. |
 | `ml-for-finance` | 2 | HMM regimes, XGBoost with chronological partitions, LSTM, sentiment models. Temporal leakage removed. |
-| `agentic-finance` | 1, 4, 5, 6 | Four agents, MessageBus, AuditTrail, FastAPI REST + WebSocket API, Streamlit and terminal dashboards. Research uses validated adapters, execution reconciles through a ledger, and risk enforces halts from that ledger. Persistence and replay are phase 7. |
+| `agentic-finance` | 1, 4, 5, 6, 7 | Four agents, MessageBus, AuditTrail, FastAPI REST + WebSocket API, Streamlit and terminal dashboards. Research uses validated adapters, execution reconciles through a ledger, risk enforces halts from that ledger, and the API is loopback-by-default with a deterministic replay. Persistence is the remaining gap. |
 
 ---
 
@@ -326,8 +333,11 @@ phases 1–2. Each is assigned to the phase that will fix it.
   the daily-loss limit resets at the UTC boundary against day-start equity, and
   halt/resume are idempotent notifications. Both the runner and the API refuse
   new risk while halted; `/risk/kill` is unconditional.
-- **API surface** *(phase 7)* — binds `0.0.0.0`, mutation endpoints are
-  unauthenticated, CORS accepts all origins. Run on loopback only.
+- **API surface** *(fixed)* — binds loopback by default, supports `QUANT_API_KEY`
+  for shared deployments, restricts CORS to configured origins, and gates bus
+  publication to a debug-only, allow-listed namespace. `/health` and `/research`
+  identify demo models. Residual: WebSocket auth uses a header (not usable from a
+  browser), and there is no rate limiting or TLS — put it behind a proxy.
 - **Claims not implemented** — no LangGraph, no reinforcement learning, no
   toxicity-spike or time-based exits, and the C++ layer is a sorted vector, not
   lock-free, without GIL release.
@@ -344,6 +354,8 @@ phases 1–2. Each is assigned to the phase that will fix it.
 | [`docs/README.md`](docs/README.md) | Index of architecture decision records (they live in each module's `narrative.md`) |
 | [`evidence/R-03.md`](evidence/R-03.md) | Independent verification of phases 1–2, defects found, C++ build |
 | [`evidence/bench-order-book.json`](evidence/bench-order-book.json) | Raw benchmark output |
+| [`evidence/replay-baseline.json`](evidence/replay-baseline.json) | Deterministic replay: invariant and reconciliation report |
+| [`evidence/replay-halt.json`](evidence/replay-halt.json) | Adverse-shock replay: halt, zero entries after halt |
 | [`evidence/W5-07.md`](evidence/W5-07.md) | Historical claim sweep on the earlier revision |
 
 ---

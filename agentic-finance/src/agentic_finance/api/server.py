@@ -28,14 +28,16 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime
 from typing import Any, AsyncIterator
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from agentic_finance.audit_trail import AuditTrail
@@ -58,6 +60,7 @@ class ResearchResponse(BaseModel):
     summary: str
     llm_report: str
     request_id: str
+    demo: bool = False
 
 
 class SignalRequest(BaseModel):
@@ -140,6 +143,7 @@ class AppState:
     def __init__(self) -> None:
         self.bus = MessageBus()
         self.audit = AuditTrail()
+        self.demo_models = False
         self.research = ResearchAgent(self.bus, self.audit)
         self.execution = ExecutionAgent(self.bus, self.audit)
         self.risk = RiskManager(self.bus, self.audit)
@@ -202,6 +206,7 @@ class AppState:
         self.research.register_model("forecast", _demo_forecast("forecast"))
         self.research.register_model("lstm", _demo_forecast("lstm"))
         self.research.register_model("sentiment", _demo_forecast("sentiment"))
+        self.demo_models = True
 
 
 _state: AppState | None = None
@@ -250,6 +255,47 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 # ── FastAPI app ─────────────────────────────────────────────────────
 
+# ---------------------------------------------------------------------------
+# Runtime configuration, read per call so tests and operators can override
+# ---------------------------------------------------------------------------
+DEFAULT_HOST = "127.0.0.1"   # loopback: never expose mutation endpoints by default
+
+
+def api_host() -> str:
+    return os.environ.get("QUANT_API_HOST", DEFAULT_HOST)
+
+
+def api_port() -> int:
+    return int(os.environ.get("QUANT_API_PORT", "8000"))
+
+
+def api_key() -> str:
+    return os.environ.get("QUANT_API_KEY", "")
+
+
+def debug_enabled() -> bool:
+    return os.environ.get("QUANT_DEBUG", "0") == "1"
+
+
+def allowed_origins() -> list[str]:
+    """Loopback-only CORS unless explicitly configured."""
+    raw = os.environ.get("QUANT_CORS_ORIGINS", "")
+    if raw:
+        return [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return ["http://127.0.0.1:8501", "http://localhost:8501"]
+
+
+def allowed_bus_topics() -> set[str]:
+    """
+    Topics a client may publish to via `/bus/publish`.
+
+    Entry ending with '.' is a prefix. Default is a simulated-data namespace, so
+    a client cannot inject `risk.halted`, `research.completed` or an order.
+    """
+    raw = os.environ.get("QUANT_BUS_ALLOWED_TOPICS", "sim.")
+    return {topic.strip() for topic in raw.split(",") if topic.strip()}
+
+
 app = FastAPI(
     title="quant-research-ig API",
     description="REST API for the agentic quant trading platform",
@@ -259,13 +305,52 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    # Loopback origins only by default. A shared deployment must set
+    # QUANT_CORS_ORIGINS explicitly (and QUANT_API_KEY).
+    allow_origins=allowed_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    """
+    Optional bearer-style key for shared deployments.
+
+    WHY OPTIONAL: the API is bound to loopback by default, where a key adds
+    friction without adding safety. The moment it is reachable by anything else,
+    `QUANT_API_KEY` must be set; every endpoint except `/health` then requires
+    the `X-API-Key` header.
+    """
+    key = api_key()
+    if key and request.url.path != "/health":
+        if request.headers.get("X-API-Key") != key:
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "invalid or missing API key"},
+            )
+    return await call_next(request)
+
+
 # ── Research endpoints ──────────────────────────────────────────────
+
+@app.get("/health")
+async def health() -> dict[str, Any]:
+    """Liveness plus the security/demo posture a client should know about."""
+    _ensure_models()
+    state = get_state()
+    return {
+        "status": "ok",
+        "host": api_host(),
+        "port": api_port(),
+        "auth_required": bool(api_key()),
+        "debug": debug_enabled(),
+        "demo_models": getattr(state, "demo_models", False),
+        "halted": state.risk.is_halted,
+        "execution_active": state.execution.is_active,
+    }
+
 
 class ResearchRequestBody(BaseModel):
     model_type: str = Field(default="regime", pattern=r"^(regime|forecast|lstm|sentiment)$")
@@ -296,6 +381,7 @@ async def run_research(epic: str, body: ResearchRequestBody) -> ResearchResponse
         summary=result.summary,
         llm_report=result.llm_report,
         request_id=result.request_id,
+        demo=state.demo_models,
     )
 
 
@@ -479,6 +565,31 @@ async def get_audit_entry(decision_id: str) -> AuditEntryResponse:
 
 @app.post("/bus/publish")
 async def bus_publish(body: BusPublishRequest) -> BusPublishResponse:
+    """
+    Debug-only, allow-listed bus publication.
+
+    WHY: an unauthenticated endpoint that publishes to any topic can inject
+    `risk.halted` or `research.completed` and drive the system. Publication is
+    disabled unless QUANT_DEBUG=1 and the topic matches QUANT_BUS_ALLOWED_TOPICS
+    (default: the `sim.` namespace).
+    """
+    if not debug_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail="bus publication is disabled; set QUANT_DEBUG=1 for a debug session",
+        )
+    topic = body.topic
+    allowed = allowed_bus_topics()
+    permitted = any(
+        topic == entry or (entry.endswith(".") and topic.startswith(entry))
+        for entry in allowed
+    )
+    if not permitted:
+        raise HTTPException(
+            status_code=403,
+            detail=f"topic not allow-listed: {topic} (allowed: {sorted(allowed)})",
+        )
+
     msg = get_state().bus.publish_topic(
         topic=body.topic,
         sender=body.sender,
@@ -495,6 +606,9 @@ async def bus_publish(body: BusPublishRequest) -> BusPublishResponse:
 
 @app.websocket("/stream/{epic}")
 async def market_stream(websocket: WebSocket, epic: str) -> None:
+    if api_key() and websocket.headers.get("x-api-key") != api_key():
+        await websocket.close(code=4401)
+        return
     await websocket.accept()
     logger.info("WS connected: %s", epic)
 
@@ -533,7 +647,8 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
     )
-    uvicorn.run("agentic_finance.api.server:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("agentic_finance.api.server:app", host=api_host(), port=api_port(),
+                reload=False)
 
 
 if __name__ == "__main__":

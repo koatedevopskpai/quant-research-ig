@@ -1,0 +1,34 @@
+{
+  "events": 352,
+  "orders": 60,
+  "fills": 60,
+  "final_equity": 100360.97041140207,
+  "halted": false,
+  "halt_reason": null,
+  "entries_after_halt": 0,
+  "audit_entries": 154,
+  "reconcile": {
+    "equity": 100360.97041140207,
+    "expected": 100360.97041140209,
+    "difference": -1.4551915228366852e-11,
+    "balanced": true,
+    "cash": 90311.56057057892,
+    "realized_pnl": 261.23114686483694,
+    "unrealized_pnl": 110.74091440187564,
+    "commissions": 11.00164986463595,
+    "fills": 60
+  },
+  "invariants": {
+    "accounting_balanced": true,
+    "fills_have_orders": true,
+    "no_new_entries_after_halt": true,
+    "position_within_cap": true,
+    "instruments_isolated": true,
+    "audit_recorded": true,
+    "equity_matches_reconcile": true
+  },
+  "marks": {
+    "CS.SYNTH.RANGE.IP": 1.1397611966264602,
+    "IX.SYNTH.TREND.IP": 115.17109214226338
+  }
+}
