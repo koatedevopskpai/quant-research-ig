@@ -1,8 +1,9 @@
 # Phase 3 — market data: provider boundary, replay, and adapters
 
-Status: **partial**. The provider layer, the two confirmed IG adapter defects and
-a deterministic replay path are done and tested. Per-instrument routing in the
-runner and ingestion/normalisation defects are not yet done. Phase 3 stays open.
+Status: **complete for the provider-neutral pipeline** (2026-10-26). The provider
+layer, the confirmed IG adapter defects, per-instrument routing, ingestion
+normalisation and deterministic replay are done and tested. The only open items
+are IG-specific and blocked by the account suspension.
 
 > **IG deferred (2026-10-26).** The demo account was suspended after the single
 > authorised read-only session recorded below. The adapter fixes are proven by
@@ -93,14 +94,30 @@ Live, read-only, 2026-10-26:
 | Binance `BTCUSDT` | 5,453 L2 events + 676 trades in 15 s; book populated |
 | Dukascopy | first request returned 18,022 bytes; subsequent attempts timed out from this host (TCP connects, TLS handshake stalls). Decoder covered offline; downloader is environment-dependent. |
 
-## Open items (phase 3 remains incomplete)
+## Routing and ingestion (completed)
+
+- **Per-instrument runner state.** `ProductionRunner` now holds `books`,
+  `analysers` and `_price_caches` keyed by EPIC and routes on `msg.epic`. An
+  update for an unknown EPIC is ignored rather than corrupting shared state.
+  Regression tests feed 100/101 and 1/1.1 into one runner and assert two
+  uncrossed books and two separate price histories.
+- **L1 replacement.** `OrderBook.apply_l1(bid, ask, bid_size, ask_size)` replaces
+  both sides. Applying an L1 quote through `apply_diff` left stale levels (the
+  crossed-book symptom) and treated a missing size (0) as "delete the level".
+- **Opening prices.** Ingestion reads `openPrice`, not `closePrice`. A missing
+  open is `None`, never silently the close.
+- **Timestamps.** `_parse_snapshot_time` prefers `snapshotTimeUTC`, converts
+  offsets to UTC, treats naive `snapshotTime` as UTC by convention, accepts the
+  slash format, and returns `None` for unparseable values instead of storing a
+  naive datetime that TIMESTAMPTZ would interpret in the session timezone.
+
+Tests: 546 pass, including 9 ingestion-normalisation tests, 6 instrument-isolation
+tests and 3 L1-replacement tests.
+
+## Open items (IG-specific)
 
 1. **IG transport unverified.** The account is suspended. The fixes are proven by
    the one authorised run and by tests, not by ongoing delivery.
 2. **IG L1 `MARKET:` items delivered nothing** even with the corrected callback,
    across MERGE/DISTINCT, both EPICs and several field sets, with no subscription
    error. Ticks on `CHART:` worked on the same connection. Cause unknown.
-3. **Runner routing.** `run_production` still keeps one book/analyser/price cache
-   for all EPICs; the provider layer is per-instrument but the runner is not.
-4. **Ingestion.** Opening prices are still filled from closing prices, and
-   timezone-naive timestamps are still not normalised to UTC.

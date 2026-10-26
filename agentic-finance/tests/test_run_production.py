@@ -25,8 +25,8 @@ def mock_pipeline():
     runner.risk_manager = MagicMock()
     runner.portfolio_agent = MagicMock()
     runner.tick_consumer = MagicMock()
-    runner.order_book = MagicMock()
-    runner.microstructure = MagicMock()
+    runner.books[runner.epics[0]] = MagicMock()
+    runner.analysers[runner.epics[0]] = MagicMock()
     runner.toxicity = MagicMock()
 
     return runner
@@ -44,8 +44,8 @@ def runner_with_mock_connect():
         runner.risk_manager = MagicMock()
         runner.portfolio_agent = MagicMock()
         runner.tick_consumer = MagicMock()
-        runner.order_book = MagicMock()
-        runner.microstructure = MagicMock()
+        runner.books[runner.epics[0]] = MagicMock()
+        runner.analysers[runner.epics[0]] = MagicMock()
         runner.toxicity = MagicMock()
         runner._running = True
     return runner
@@ -63,8 +63,8 @@ class TestInit:
         assert hasattr(runner, 'risk_manager')
         assert hasattr(runner, 'portfolio_agent')
         assert hasattr(runner, 'tick_consumer')
-        assert hasattr(runner, 'order_book')
-        assert hasattr(runner, 'microstructure')
+        assert hasattr(runner, 'books')
+        assert hasattr(runner, 'analysers')
         assert hasattr(runner, 'toxicity')
 
     def test_epics_defined(self):
@@ -107,27 +107,27 @@ class TestSetup:
 
 class TestTickLoop:
     def test_tick_loop_no_l1(self, mock_pipeline):
-        mock_pipeline.order_book.l1_snapshot.side_effect = ValueError("empty")
+        mock_pipeline.books[mock_pipeline.epics[0]].l1_snapshot.side_effect = ValueError("empty")
         mock_pipeline._tick_loop()  # should not raise
 
     def test_tick_loop_records_pnl(self, mock_pipeline):
-        mock_pipeline.order_book.l1_snapshot.return_value = MagicMock(
+        mock_pipeline.books[mock_pipeline.epics[0]].l1_snapshot.return_value = MagicMock(
             mid_price=105.0,
         )
         mock_pipeline._tick_loop()
         mock_pipeline.risk_manager.record_pnl.assert_called_once()
 
     def test_tick_loop_runs_research(self, mock_pipeline):
-        mock_pipeline.order_book.l1_snapshot.return_value = MagicMock(
+        mock_pipeline.books[mock_pipeline.epics[0]].l1_snapshot.return_value = MagicMock(
             mid_price=100.0,
         )
-        mock_pipeline._price_cache = [100.0] * 100  # enough for the 50-point threshold
+        mock_pipeline._price_caches[mock_pipeline.epics[0]] = [100.0] * 100  # enough for the 50-point threshold
         mock_pipeline._last_research_time = -9999  # force run
         mock_pipeline._tick_loop()
         mock_pipeline.research_agent.research.assert_called()
 
     def test_tick_loop_runs_risk_check(self, mock_pipeline):
-        mock_pipeline.order_book.l1_snapshot.return_value = MagicMock(
+        mock_pipeline.books[mock_pipeline.epics[0]].l1_snapshot.return_value = MagicMock(
             mid_price=100.0,
         )
         mock_pipeline._last_risk_check_time = -9999  # force run
@@ -136,7 +136,7 @@ class TestTickLoop:
 
     def test_tick_loop_research_catches_exception(self, mock_pipeline):
         mock_pipeline.research_agent.research.side_effect = RuntimeError("fail")
-        mock_pipeline.order_book.l1_snapshot.return_value = MagicMock(
+        mock_pipeline.books[mock_pipeline.epics[0]].l1_snapshot.return_value = MagicMock(
             mid_price=100.0,
         )
         mock_pipeline._last_research_time = -9999
@@ -144,7 +144,7 @@ class TestTickLoop:
 
     def test_tick_loop_risk_catches_exception(self, mock_pipeline):
         mock_pipeline.risk_manager.check_risk.side_effect = RuntimeError("fail")
-        mock_pipeline.order_book.l1_snapshot.return_value = MagicMock(
+        mock_pipeline.books[mock_pipeline.epics[0]].l1_snapshot.return_value = MagicMock(
             mid_price=100.0,
         )
         mock_pipeline._last_risk_check_time = -9999
