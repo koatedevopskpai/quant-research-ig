@@ -139,6 +139,10 @@ class ProductionRunner:
     def setup(self) -> None:
         logger.info("Setting up production pipeline")
 
+        # Risk values P&L and exposure from the execution ledger, not from a
+        # price-level heuristic.
+        self.risk_manager.set_ledger(self.execution_agent.ledger)
+
         # Subscribe TickConsumer to all epics
         for epic in EPICS:
             self.tick_consumer.subscribe(epic, self._on_market_data)
@@ -166,10 +170,14 @@ class ProductionRunner:
         state = self.portfolio_agent.allocate(method="risk_parity")
         logger.info("Initial allocation: %s", state)
 
-        # Wire bus subscriptions for inter-agent communication
+        # Wire bus subscriptions for inter-agent communication.
+        # NOTE: these are STATE notifications. The halt command is never
+        # republished by the handler that consumes it, which is what caused the
+        # review's recursive kill events.
         self.message_bus.subscribe("research.completed",
                                    self._on_research_completed)
-        self.message_bus.subscribe("risk.kill", self._on_kill_switch)
+        self.message_bus.subscribe("risk.halted", self._on_risk_halted)
+        self.message_bus.subscribe("risk.resumed", self._on_risk_resumed)
 
     # ── Market data callback ────────────────────────────────────────
 
@@ -192,6 +200,8 @@ class ProductionRunner:
         if msg.message_type == "L1":
             # IG L1 is a snapshot of the top of book, not a depth diff.
             book.apply_l1(msg.bid_price, msg.ask_price, msg.bid_size, msg.ask_size)
+            if msg.bid_price > 0 and msg.ask_price > 0:
+                self.risk_manager.update_mark(epic, (msg.bid_price + msg.ask_price) / 2.0)
         elif msg.message_type == "L2":
             if msg.bid_price > 0:
                 book.apply_diff("bid", msg.bid_price, msg.bid_size, 0)
@@ -212,6 +222,14 @@ class ProductionRunner:
 
     def _on_research_completed(self, msg) -> None:
         """Convert a research result into a trading signal."""
+        # Enforcement point 1 (runner). The execution agent also refuses signals
+        # while halted, but the runner must not even ask.
+        if (self.risk_manager.is_halted is True
+                or self.execution_agent.is_active is False
+                or self.risk_manager.can_trade() is False):
+            logger.warning("Trading halted or limits breached — discarding research result")
+            return
+
         payload = msg.payload
         epic = payload.get("epic", "")
         output = payload.get("output", {})
@@ -264,10 +282,16 @@ class ProductionRunner:
         else:
             logger.info("No order for %s (veto or zero size)", epic)
 
-    def _on_kill_switch(self, msg) -> None:
-        """Handle kill switch from risk manager."""
-        logger.warning("KILL SWITCH triggered: %s", msg.payload)
-        self.execution_agent.kill()
+    def _on_risk_halted(self, msg) -> None:
+        """Risk halted trading: stop accepting signals (idempotent)."""
+        reason = msg.payload.get("reason", "risk halt") if msg.payload else "risk halt"
+        logger.warning("RISK HALT: %s", reason)
+        self.execution_agent.halt(reason)
+
+    def _on_risk_resumed(self, msg) -> None:
+        """Risk resumed trading: allow signals again (idempotent)."""
+        logger.warning("RISK RESUME requested")
+        self.execution_agent.resume()
 
     # ── Periodic tasks ──────────────────────────────────────────────
 
@@ -315,16 +339,16 @@ class ProductionRunner:
 
     def _tick_loop(self) -> None:
         """Background periodic tasks: research, risk check, PnL."""
-        l1 = None
-        try:
-            # P&L is still derived from the first EPIC's mid price; per-ledger
-            # mark-to-market is phase 6.
-            l1 = self.books[self.epics[0]].l1_snapshot()
-        except ValueError:
-            pass
-
-        if l1 and l1.mid_price > 0:
-            self.risk_manager.record_pnl((l1.mid_price - 100.0) * 10)
+        # Mark every instrument from its own book; risk values the ledger against
+        # these marks. The old code booked (mid - 100) * 10 regardless of
+        # holdings, which was not P&L in any meaningful sense.
+        for epic, book in self.books.items():
+            try:
+                l1 = book.l1_snapshot()
+            except ValueError:
+                continue
+            if l1 and l1.mid_price > 0:
+                self.risk_manager.update_mark(epic, l1.mid_price)
 
         now = time.time()
         if now - self._last_research_time > RESEARCH_INTERVAL:

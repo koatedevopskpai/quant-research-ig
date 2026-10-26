@@ -141,21 +141,48 @@ class ExecutionAgent:
         if max_pos is not None:
             self.max_position_pct = max_pos
 
-    def kill(self) -> None:
+    @property
+    def is_active(self) -> bool:
+        return self._active
+
+    def halt(self, reason: str = "kill switch") -> bool:
+        """
+        Stop accepting signals. Idempotent: returns True only if it changed state.
+
+        WHY NOT A COMMAND TOPIC:
+            The old `kill()` published `risk.kill`, the same topic its caller was
+            subscribed to, so one halt re-entered the handler and republished —
+            nine publications from one event in the review's reproduction. Halt
+            now publishes `execution.halted`, a notification that nothing
+            re-issues.
+        """
+        if not self._active:
+            return False
         self._active = False
         decision = Decision.now(
             agent="ExecutionAgent",
             decision_type=DecisionType.KILL_SWITCH,
-            description="Execution halted by kill switch",
-            context={"active": False},
+            description=f"Execution halted: {reason}",
+            context={"active": False, "reason": reason},
         )
         decision.status = DecisionStatus.EXECUTED
         self.audit_trail.record(decision, tags=["kill_switch"])
-        self.message_bus.publish_topic("risk.kill", "ExecutionAgent", {"active": False})
+        self.message_bus.publish_topic(
+            "execution.halted", "ExecutionAgent", {"reason": reason}
+        )
+        return True
 
-    def resume(self) -> None:
+    def resume(self) -> bool:
+        """Resume trading. Idempotent: returns True only if it changed state."""
+        if self._active:
+            return False
         self._active = True
-        self.message_bus.publish_topic("risk.kill", "ExecutionAgent", {"active": True})
+        self.message_bus.publish_topic("execution.resumed", "ExecutionAgent", {})
+        return True
+
+    def kill(self) -> bool:
+        """Backwards-compatible name for `halt`."""
+        return self.halt("kill switch")
 
     # ------------------------------------------------------------------
     # Signal handling

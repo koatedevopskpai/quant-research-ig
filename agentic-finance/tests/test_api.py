@@ -130,10 +130,17 @@ class TestApiRisk:
     def test_kill_switch(self):
         resp = client.post("/risk/kill")
         assert resp.status_code == 200
-        data = resp.json()
-        assert "killed" in data
-        # Reset the kill state for subsequent tests
-        get_state().execution.resume()
+        assert resp.json()["halted"] is True
+
+        # A halt must stop new risk through the API, not only in the runner.
+        blocked = client.post("/signal", json={
+            "epic": "HALTED_EPIC", "direction": 1.0, "confidence": 0.8,
+        })
+        assert blocked.status_code == 409
+
+        resumed = client.post("/risk/resume")
+        assert resumed.status_code == 200
+        assert resumed.json()["resumed"] is True
 
 
 class TestApiPortfolio:
