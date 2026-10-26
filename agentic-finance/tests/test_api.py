@@ -217,9 +217,20 @@ class TestApiAudit:
 
 
 class TestApiBus:
-    """Message bus endpoint tests."""
+    """Message bus endpoint tests (publication is debug-only and allow-listed)."""
 
-    def test_bus_publish(self):
+    def test_bus_publish_disabled_by_default(self, monkeypatch):
+        monkeypatch.delenv("QUANT_DEBUG", raising=False)
+        resp = client.post("/bus/publish", json={
+            "topic": "test.topic",
+            "sender": "test",
+            "payload": {"key": "value"},
+        })
+        assert resp.status_code == 403
+
+    def test_bus_publish_allowed_in_debug(self, monkeypatch):
+        monkeypatch.setenv("QUANT_DEBUG", "1")
+        monkeypatch.setenv("QUANT_BUS_ALLOWED_TOPICS", "test.")
         received = []
 
         def handler(msg):
@@ -235,5 +246,6 @@ class TestApiBus:
         data = resp.json()
         assert data["topic"] == "test.topic"
         assert data["sender"] == "test"
+        assert received
         assert len(received) == 1
         assert received[0].payload["key"] == "value"
