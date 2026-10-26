@@ -107,8 +107,10 @@ class TestApiExecution:
 
     def test_signal_default_price(self):
         """current_price defaults to 100.0 if omitted."""
+        # Distinct EPIC: the previous test already moved TEST to its target, and
+        # a signal that requires no change is correctly a no-op.
         resp = client.post("/signal", json={
-            "epic": "TEST",
+            "epic": "TEST_DEFAULT_PRICE",
             "direction": 0.5,
             "confidence": 0.7,
         })
