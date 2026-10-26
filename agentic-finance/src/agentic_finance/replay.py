@@ -199,25 +199,29 @@ def _price(event: MarketEvent) -> float:
 
 
 def run_replay(events: Iterable[MarketEvent],
-               config: ReplayConfig = ReplayConfig()) -> ReplayResult:
+               config: ReplayConfig = ReplayConfig(),
+               store: Any = None,
+               run_id: str = "replay") -> ReplayResult:
     ordered = sorted(events, key=lambda e: (e.provider_ts_ns, e.epic, e.kind))
     if not ordered:
         raise ValueError("replay needs at least one event")
 
     epics = sorted({event.epic for event in ordered})
     bus = MessageBus()
-    audit = AuditTrail()
+    audit = AuditTrail(store=store)
     execution = ExecutionAgent(
         bus, audit, initial_capital=config.initial_cash,
         max_position_pct=config.max_position_pct,
         default_stop_loss_pct=config.stop_loss_pct,
         commission_bps=config.commission_bps,
         slippage_bps=config.slippage_bps,
+        store=store,
     )
     risk = RiskManager(
         bus, audit, initial_capital=config.initial_cash,
         max_drawdown_limit=config.max_drawdown_limit,
         daily_loss_limit=config.daily_loss_limit,
+        store=store, restore_state=False,
     )
     risk.set_ledger(execution.ledger)
     # Same wiring as the runner and API: a halt notification stops execution.
@@ -285,7 +289,10 @@ def run_replay(events: Iterable[MarketEvent],
                 "risk breach",
             )
 
-        equity_curve.append(execution.equity(last_price))
+        equity = execution.equity(last_price)
+        equity_curve.append(equity)
+        if store is not None:
+            store.append_equity(run_id, index, equity)
 
     # New risk after a halt is forbidden; reductions and protective exits are not.
     entries_after_halt = 0
@@ -323,7 +330,7 @@ def run_replay(events: Iterable[MarketEvent],
         ) < 1e-6,
     }
 
-    return ReplayResult(
+    result = ReplayResult(
         events=len(ordered),
         orders=len(execution.orders),
         fills=len(execution.ledger.fills),
@@ -337,7 +344,9 @@ def run_replay(events: Iterable[MarketEvent],
         audit_entries=audit.count(),
         marks=dict(last_price),
     )
-
+    if store is not None:
+        store.save_run(run_id, result.summary())
+    return result
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -347,6 +356,8 @@ def main() -> None:
     parser.add_argument("--daily-loss-limit", type=float, default=0.03)
     parser.add_argument("--stop-loss-pct", type=float, default=0.02)
     parser.add_argument("--json", type=Path, default=None)
+    parser.add_argument("--state-db", type=Path, default=None,
+                        help="persist orders/fills/audit/risk and the run summary")
     args = parser.parse_args()
 
     events = default_events(args.steps)
@@ -368,7 +379,17 @@ def main() -> None:
         daily_loss_limit=args.daily_loss_limit,
         stop_loss_pct=args.stop_loss_pct,
     )
-    result = run_replay(events, config)
+    store = None
+    if args.state_db is not None:
+        from agentic_finance.persistence import StateStore
+
+        store = StateStore(args.state_db)
+    try:
+        result = run_replay(events, config, store=store,
+                            run_id=f"replay-{args.steps}-{args.shock_after}")
+    finally:
+        if store is not None:
+            store.close()
     payload = result.summary()
     print(json.dumps(payload, indent=2))
     if args.json:

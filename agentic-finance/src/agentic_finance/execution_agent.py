@@ -76,7 +76,8 @@ class ExecutionAgent:
                  commission_bps: float = 1.0,
                  slippage_bps: float = 0.0,
                  fill_ratio: float = 1.0,
-                 min_order_notional: float = 1.0):
+                 min_order_notional: float = 1.0,
+                 store: Any = None):
         self.message_bus = message_bus
         self.audit_trail = audit_trail
         self.capital = initial_capital
@@ -88,8 +89,10 @@ class ExecutionAgent:
             raise ValueError("fill_ratio must be in (0, 1]")
 
         self.ledger = PositionLedger(
-            initial_capital, commission_bps=commission_bps, slippage_bps=slippage_bps
+            initial_capital, commission_bps=commission_bps,
+            slippage_bps=slippage_bps, store=store
         )
+        self._store = store
         self.orders: list[Order] = []
         self._marks: dict[str, float] = {}
         self._protective: dict[str, tuple[float | None, float | None]] = {}
@@ -183,6 +186,49 @@ class ExecutionAgent:
     def kill(self) -> bool:
         """Backwards-compatible name for `halt`."""
         return self.halt("kill switch")
+
+    # ------------------------------------------------------------------
+    # Restore
+    # ------------------------------------------------------------------
+
+    def restore(self) -> int:
+        """
+        Rebuild orders, fills and positions from the store.
+
+        Fills are the source of truth: replaying them reproduces cash and
+        positions exactly, so a restart resumes the same book rather than a
+        fresh one. Returns the number of fills restored.
+        """
+        if self._store is None:
+            return 0
+        restored = self.ledger.restore()
+        if self.orders:
+            return restored
+
+        fills_by_order: dict[str, list[Fill]] = {}
+        for fill in self.ledger.fills:
+            fills_by_order.setdefault(fill.order_id, []).append(fill)
+
+        for row in self._store.load_orders():
+            timestamp = row.get("created_at")
+            order = Order(
+                epic=row["epic"],
+                side=row["side"],
+                size=float(row["size"]),
+                order_type=row["order_type"],
+                stop_loss=row.get("stop_loss"),
+                take_profit=row.get("take_profit"),
+                order_id=row["order_id"],
+                timestamp=(datetime.fromisoformat(timestamp) if timestamp else None),
+                status=row["status"],
+                reasoning=row.get("reasoning") or "",
+                filled_size=float(row.get("filled_size") or 0.0),
+                avg_fill_price=row.get("avg_fill_price"),
+                reason=row.get("reason") or "",
+            )
+            order.fills = fills_by_order.get(order.order_id, [])
+            self.orders.append(order)
+        return restored
 
     # ------------------------------------------------------------------
     # Signal handling
@@ -281,6 +327,8 @@ class ExecutionAgent:
         order.timestamp = order.timestamp or datetime.now(timezone.utc)
         order.reason = reason or order.reason
         self.orders.append(order)
+        if self._store is not None:
+            self._store.save_order(order)
 
         decision = Decision.now(
             agent="ExecutionAgent",
@@ -329,6 +377,8 @@ class ExecutionAgent:
         order.avg_fill_price = (notional_before + fill.price * fill.quantity) / order.filled_size
         order.fills.append(fill)
         order.status = "filled" if order.remaining <= 1e-9 else "partially_filled"
+        if self._store is not None:
+            self._store.save_order(order)
 
         self._marks[order.epic] = price
         position = self.ledger.positions.get(order.epic)

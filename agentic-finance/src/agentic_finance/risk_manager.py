@@ -50,7 +50,9 @@ class RiskManager:
                  daily_loss_limit: float = 0.03,
                  var_limit: float = 0.02,
                  var_confidence: float = 0.95,
-                 clock: Optional[Callable[[], datetime]] = None):
+                 clock: Optional[Callable[[], datetime]] = None,
+                 store: Any = None,
+                 restore_state: bool = True):
         self.message_bus = message_bus
         self.audit_trail = audit_trail
         self.initial_capital = initial_capital
@@ -70,6 +72,42 @@ class RiskManager:
         self._halted = False
         self._ledger: Any = None
         self._marks: dict[str, float] = {}
+        self._store = store
+        if restore_state:
+            self.restore()
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    def _persist(self) -> None:
+        if self._store is None:
+            return
+        self._store.save_risk_state({
+            "halted": self._halted,
+            "daily_start": self._daily_start_capital,
+            "peak": self.peak_capital,
+            "current_capital": self.current_capital,
+            "daily_pnl": self.daily_pnl,
+            "last_reset_date": self._last_reset_date.isoformat(),
+        })
+
+    def restore(self) -> bool:
+        """Load the previous halt flag, day-start equity and peak."""
+        if self._store is None:
+            return False
+        state = self._store.load_risk_state()
+        if not state:
+            return False
+        self._halted = bool(state["halted"])
+        self._daily_start_capital = float(state["daily_start"])
+        self.peak_capital = float(state["peak"])
+        self.current_capital = float(state["current_capital"])
+        self.daily_pnl = float(state["daily_pnl"])
+        self._last_reset_date = datetime.fromisoformat(
+            state["last_reset_date"]
+        ).date()
+        return True
 
     # ------------------------------------------------------------------
     # Ledger integration
@@ -108,6 +146,7 @@ class RiskManager:
         self._refresh_from_ledger()
         self._daily_start_capital = self.current_capital
         self.daily_pnl = 0.0
+        self._persist()
 
     # ------------------------------------------------------------------
     # Legacy manual P&L (kept for callers without a ledger / tests)
@@ -192,7 +231,7 @@ class RiskManager:
         if var_p < -self.var_limit:
             breaches.append(f"VaR={var_p:.2%} > limit={self.var_limit:.2%}")
 
-        return RiskMetrics(
+        metrics = RiskMetrics(
             var_historical=var_h,
             var_parametric=var_p,
             var_monte_carlo=var_mc,
@@ -206,6 +245,8 @@ class RiskManager:
             exposure_pct=(exposure / equity) if equity > 0 else 0.0,
             is_halted=self._halted,
         )
+        self._persist()
+        return metrics
 
     def check_risk(self) -> RiskMetrics:
         metrics = self.compute_metrics()
@@ -278,6 +319,7 @@ class RiskManager:
                  "equity": metrics.equity if metrics else self.current_capital,
              }},
         )
+        self._persist()
         return True
 
     def resume(self) -> bool:
@@ -295,6 +337,7 @@ class RiskManager:
         decision.status = DecisionStatus.EXECUTED
         self.audit_trail.record(decision, tags=["risk", "resume"])
         self.message_bus.publish_topic("risk.resumed", "RiskManager", {})
+        self._persist()
         return True
 
     def kill_if_needed(self) -> bool:

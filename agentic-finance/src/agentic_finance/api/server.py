@@ -141,13 +141,21 @@ class AppState:
     """Singleton container for agent instances shared across requests."""
 
     def __init__(self) -> None:
+        from agentic_finance.persistence import default_store
+
         self.bus = MessageBus()
-        self.audit = AuditTrail()
+        self.store = default_store()
+        self.audit = AuditTrail(store=self.store)
         self.demo_models = False
         self.research = ResearchAgent(self.bus, self.audit)
-        self.execution = ExecutionAgent(self.bus, self.audit)
-        self.risk = RiskManager(self.bus, self.audit)
+        self.execution = ExecutionAgent(self.bus, self.audit, store=self.store)
+        self.risk = RiskManager(self.bus, self.audit, store=self.store)
         self.portfolio = PortfolioAgent(self.bus, self.audit)
+
+        # Resume where the last process stopped: fills rebuild cash/positions,
+        # the audit trail and halt flag come back with them.
+        self.execution.restore()
+        self.audit.restore()
 
         # The API path must enforce the same controls as the runner: risk owns
         # P&L/exposure from the ledger, and a halt stops execution here too.

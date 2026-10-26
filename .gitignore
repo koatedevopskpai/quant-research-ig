@@ -114,3 +114,6 @@ project_improvement*.md
 # =============================================================================
 .docker/
 docker-compose.override.yml
+
+# Persisted paper-trading state (SQLite)
+state/

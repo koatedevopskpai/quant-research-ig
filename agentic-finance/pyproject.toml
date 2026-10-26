@@ -15,9 +15,9 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "websockets>=13",
-    "ig-market-data",
     "quant-methods",
     "ml-for-finance",
+    "ig-market-data",
     "hft-engine",
 ]
 

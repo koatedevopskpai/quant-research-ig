@@ -1,10 +1,16 @@
 """Credential-free tests; real provider traffic must be mocked explicitly."""
 
 import os
+import tempfile
 from pathlib import Path
 
 # Set before test modules import configuration. Never discover a developer's .env in CI.
 os.environ["QUANT_LOAD_DOTENV"] = "0"
+# Keep persisted state out of the repository and isolated per test session.
+os.environ.setdefault(
+    "QUANT_STATE_DB",
+    str(Path(tempfile.mkdtemp(prefix="qrig-state-")) / "state.db"),
+)
 
 import httpx
 import pytest
