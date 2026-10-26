@@ -71,10 +71,16 @@ Deliverables:
 - `src/hft_engine/microstructure/` — spread analysis, depth profiles, trade signs
 
 ### C++ Layer (pybind11)
-- `cpp/order_book.cpp` — Lock-free L1/L2 book, nanosecond timestamps
-- `cpp/feed_handler.cpp` — Tick parsing hot loop, direct memory pool
+- `cpp/order_book.cpp` — sorted-vector L1/L2 book; linear price-level lookup
+  (K ≤ 100, see ADR-002). Single-threaded, called from Python; no atomics, no
+  lock-free structures, and no GIL release on the boundary yet
+- `cpp/feed_handler.cpp` — string-field tick parsers (`parse_l1_update`,
+  `parse_l2_update`, `parse_trade_update`) and a per-epic callback registry;
+  parses into `MarketDataMessage` with a nanosecond arrival stamp. No memory
+  pool or zero-copy path
 - `cpp/microstructure.cpp` — Volume imbalance, trade clustering
-- `CMakeLists.txt` + `setup.py` for builds
+- `CMakeLists.txt` + `cpp/build_cpp.{sh,ps1,bat}` for builds. There is no
+  `setup.py`; the extension is built out-of-band and imported when present
 
 ---
 

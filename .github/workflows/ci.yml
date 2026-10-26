@@ -2,6 +2,7 @@ name: Python baseline
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -39,3 +40,21 @@ jobs:
           name: test-results-${{ matrix.os }}
           path: test-results/
           if-no-files-found: ignore
+
+  cpp:
+    name: C++ extension (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.5"
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Build hft_cpp
+        run: |
+          uv pip install pybind11 cmake
+          PYTHON="$PWD/.venv/bin/python" bash ./hft-engine/cpp/build_cpp.sh
+      - name: hft-engine suite (C++ tests must not skip)
+        run: uv run --no-sync --locked pytest hft-engine/tests/ -q -rs

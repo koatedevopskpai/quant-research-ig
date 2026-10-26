@@ -1,93 +1,96 @@
+"""DSR with explicitly supplied dispersion across independent trials.
+
+Public Sharpe inputs/outputs are annualised; variance inputs are therefore in
+annualised Sharpe squared. Sampling variance of the selected strategy is not
+a substitute for dispersion across trials. Assumes independent trial estimates.
 """
-validation/dsr.py — Deflated Sharpe Ratio (DSR)
 
-Bailey & López de Prado (2014). The DSR corrects the PSR for multiple
-testing — the fact that we tried many strategies and picked the best one.
-
-Key insight: if you test 1000 random strategies, the best one will have
-a high Sharpe by chance alone. The DSR estimates the expected maximum
-Sharpe under the null and deflates the PSR accordingly.
-
-DSR(SR*) = PSR(E[max(SR)])
-
-where E[max(SR)] is the expected maximum Sharpe ratio over N trials,
-computed using the Euler-Mascheroni approximation for the maximum of
-a normal distribution.
-
-SR* = sqrt(V(SR)) * ( (1 - gamma) * Z^-1(1 - 1/N) + gamma * Z^-1(1 - 1/N * e^-1) )
-
-This accounts for:
-    - Number of trials (strategies tried)
-    - Length of each trial (observations per strategy)
-    - Variance of the Sharpe ratio estimate
-    - Non-normality of returns (skewness, kurtosis)
-"""
+from dataclasses import dataclass
+from numbers import Integral
 
 import numpy as np
+from quant_methods.validation.psr import ProbabilisticSharpeRatio
 from scipy import stats
-from dataclasses import dataclass
-from typing import Optional
+
+
+def expected_maximum_sharpe(variance, num_trials):
+    """Expected maximum under zero-mean null, in the supplied Sharpe units."""
+    if not isinstance(num_trials, Integral) or num_trials < 1:
+        raise ValueError("num_trials must be a positive integer")
+    if not np.isfinite(variance) or variance < 0:
+        raise ValueError("Trial Sharpe variance must be finite and nonnegative")
+    if num_trials == 1 or variance == 0:
+        return 0.0
+    # isf avoids cancellation in 1 - 1/N for large searches.
+    factor = (1 - np.euler_gamma) * stats.norm.isf(
+        1 / num_trials
+    ) + np.euler_gamma * stats.norm.isf(1 / (num_trials * np.e))
+    return float(np.sqrt(variance) * factor)
 
 
 @dataclass
 class DSRResult:
     dsr: float
     psr: float
-    expected_max_sr: float
-    deflated_threshold: float
+    expected_max_sr: float  # annualised
+    deflated_threshold: float  # annualised
     num_trials: int
     n_observations: int
     is_significant: bool
+    trial_sharpe_variance: float  # annualised Sharpe squared
+    variance_source: str
 
 
 class DeflatedSharpeRatio:
-    def __init__(self, risk_free_rate: float = 0.0, periods_per_year: int = 252):
-        self.risk_free_rate = risk_free_rate
-        self.periods_per_year = periods_per_year
+    def __init__(self, risk_free_rate=0.0, periods_per_year=252):
+        self._psr = ProbabilisticSharpeRatio(risk_free_rate, periods_per_year)
 
-    def _sharpe_variance(self, n: int, skew: float, kurt: float, sr: float) -> float:
-        return (1 + 0.5 * sr ** 2 - skew * sr + (kurt - 1) / 4 * sr ** 2) / (n - 1)
-
-    def _expected_max_sharpe(self, n: int, num_trials: int, skew: float,
-                              kurt: float, sr_hat: float) -> float:
-        var_sr = self._sharpe_variance(n, skew, kurt, sr_hat)
-        if var_sr <= 0:
-            return 0.0
-        se = np.sqrt(var_sr)
-        emc = 0.5772156649
-        z_max = (1 - np.euler_gamma) * stats.norm.ppf(1 - 1.0 / num_trials) \
-                + np.euler_gamma * stats.norm.ppf(1 - 1.0 / (num_trials * np.e))
-        return se * z_max
-
-    def compute(self, returns: np.ndarray, num_trials: int = 1,
-                threshold_sharpe: Optional[float] = None) -> DSRResult:
-        from quant_methods.validation.psr import ProbabilisticSharpeRatio
-        returns = np.asarray(returns, dtype=float).flatten()
-        if len(returns) < 3:
-            raise ValueError(f"Need >=3 observations, got {len(returns)}")
-        psr = ProbabilisticSharpeRatio(self.risk_free_rate, self.periods_per_year)
-        psr_result = psr.compute(returns, threshold_sharpe)
-
-        if threshold_sharpe is None:
-            threshold_sharpe = self.risk_free_rate
-
-        n = len(returns)
-        excess = returns - self.risk_free_rate / self.periods_per_year
-        sr_hat = (excess.mean() / excess.std() * np.sqrt(self.periods_per_year)
-                  if excess.std() > 0 else 0.0)
-        skew = float(stats.skew(returns))
-        kurt = float(stats.kurtosis(returns, fisher=True))
-        e_max_sr = self._expected_max_sharpe(n, num_trials, skew, kurt, sr_hat)
-        deflated_threshold = max(threshold_sharpe, e_max_sr)
-
-        dsr_result = psr.compute(returns, deflated_threshold)
-
+    def compute(
+        self,
+        returns,
+        num_trials=None,
+        threshold_sharpe=None,
+        *,
+        trial_sharpes=None,
+        trial_sharpe_variance=None,
+        significance_level=0.05,
+    ):
+        if trial_sharpes is not None and trial_sharpe_variance is not None:
+            raise ValueError("Supply trial_sharpes or trial_sharpe_variance, not both")
+        if trial_sharpes is not None:
+            candidates = np.asarray(trial_sharpes, dtype=float)
+            if candidates.ndim != 1 or len(candidates) < 2 or not np.isfinite(candidates).all():
+                raise ValueError("trial_sharpes must contain at least two finite annualised values")
+            if num_trials is None:
+                num_trials = len(candidates)
+            if num_trials != len(candidates):
+                raise ValueError("num_trials must match trial_sharpes length")
+            variance = float(candidates.var(ddof=1))
+            source = "empirical"
+        else:
+            num_trials = 1 if num_trials is None else num_trials
+            if trial_sharpe_variance is None:
+                if num_trials != 1:
+                    raise ValueError(
+                        "Multiple trials require trial_sharpes or trial_sharpe_variance"
+                    )
+                variance, source = 0.0, "single_trial"
+            else:
+                variance, source = float(trial_sharpe_variance), "provided"
+        maximum = expected_maximum_sharpe(variance, num_trials)
+        base = self._psr.compute(returns, threshold_sharpe, significance_level=significance_level)
+        threshold = (
+            base.threshold_sharpe if num_trials == 1 else max(base.threshold_sharpe, maximum)
+        )
+        deflated = self._psr.compute(returns, threshold, significance_level=significance_level)
         return DSRResult(
-            dsr=dsr_result.psr,
-            psr=psr_result.psr,
-            expected_max_sr=e_max_sr,
-            deflated_threshold=deflated_threshold,
-            num_trials=num_trials,
-            n_observations=n,
-            is_significant=dsr_result.psr >= 0.95,
+            deflated.psr,
+            base.psr,
+            maximum,
+            threshold,
+            num_trials,
+            base.n_observations,
+            deflated.is_significant,
+            variance,
+            source,
         )

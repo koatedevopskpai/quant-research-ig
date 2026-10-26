@@ -208,17 +208,15 @@ class XGBoostForecaster:
         """
         Fit the XGBoost model to historical price data.
 
-        Uses walk-forward validation:
-        - Train: first (1 - test_size) portion of data
-        - Test: last test_size portion
-        - WHY walk-forward vs. random split: Time series data has temporal
-          dependencies. Random splitting leaks future information into the
-          training set.
+        Uses a chronological train/validation/test split. The final test_size
+        portion is held out from both fitting and early stopping. The preceding
+        development history is split 80/20 for training/early stopping. Labels
+        overlapping the next partition are purged at both boundaries.
 
         Args:
             prices: Series of closing prices with datetime index (or
                     DataFrame with 'close' column).
-            target_horizon: Number of days ahead to predict.
+            target_horizon: Observation steps over which to predict cumulative log return.
 
         Returns:
             Self (fitted model).
@@ -228,12 +226,21 @@ class XGBoostForecaster:
             prices = prices["close"] if "close" in prices.columns else prices.iloc[:, 0]
             prices = prices.squeeze()
 
+        if not isinstance(target_horizon, (int, np.integer)) or target_horizon < 1:
+            raise ValueError("target_horizon must be a positive integer")
+        if not 0 < self.test_size < 1 or self.early_stopping_rounds < 1:
+            raise ValueError("test_size must be between 0 and 1; early stopping must be positive")
+        if (not isinstance(prices.index, pd.DatetimeIndex) or not prices.index.is_unique
+                or not prices.index.is_monotonic_increasing):
+            raise ValueError("prices must have a unique, increasing DatetimeIndex")
+        if not np.isfinite(prices).all() or (prices <= 0).any():
+            raise ValueError("prices must be finite and positive")
+
         # Create features
         features = self._create_features(prices)
 
         # Target: future log return
-        log_ret = np.log(prices / prices.shift(1))
-        target = log_ret.shift(-target_horizon)
+        target = np.log(prices.shift(-target_horizon) / prices)
 
         # Align features and target (drop NaN from shift)
         data = pd.concat([features, target.rename("target")], axis=1).dropna()
@@ -245,17 +252,36 @@ class XGBoostForecaster:
         X = data[self._feature_names].values
         y = data["target"].values
 
-        # Walk-forward split
-        split_idx = int(len(X) * (1 - self.test_size))
-        X_train, X_test = X[:split_idx], X[split_idx:]
-        y_train, y_test = y[:split_idx], y[split_idx:]
+        # Outer chronological test is untouched by fitting or early stopping.
+        # Purge labels whose inclusive outcome interval reaches the next partition.
+        # Choose boundaries on raw observation positions, not complete-case row
+        # counts: missing future features must not move the historical cutoff.
+        test_start = int((len(prices) - target_horizon) * (1 - self.test_size))
+        validation_start = int(test_start * 0.8)
+        if not 0 < validation_start < test_start < len(prices) - target_horizon:
+            raise ValueError("Need nonempty train, validation and test partitions")
+        row_positions = prices.index.get_indexer(data.index)
+        label_end = row_positions + target_horizon
+        train_indices = np.flatnonzero(label_end < validation_start)
+        validation_indices = np.flatnonzero((row_positions >= validation_start) & (label_end < test_start))
+        test_indices = np.flatnonzero(row_positions >= test_start)
+        if min(len(train_indices), len(validation_indices), len(test_indices)) < 2:
+            raise ValueError("Label purging left insufficient training or validation data")
+        X_train, y_train = X[train_indices], y[train_indices]
+        X_val, y_val = X[validation_indices], y[validation_indices]
+        X_test, y_test = X[test_indices], y[test_indices]
+        self._train_indices = row_positions[train_indices]
+        self._validation_indices = row_positions[validation_indices]
+        self._test_indices = row_positions[test_indices]
 
         # Train with early stopping
-        self._model = xgb.XGBRegressor(**self.model_params)
+        params = dict(self.model_params)
+        params["early_stopping_rounds"] = self.early_stopping_rounds
+        self._model = xgb.XGBRegressor(**params)
         self._model.fit(
             X_train,
             y_train,
-            eval_set=[(X_test, y_test)],
+            eval_set=[(X_val, y_val)],
             verbose=False,
         )
 
@@ -273,8 +299,10 @@ class XGBoostForecaster:
         """
         Generate return forecasts.
 
-        If prices is provided, generates out-of-sample forecasts using
-        the test portion of the data. Otherwise uses the stored test set.
+        Without prices, uses the stored outer holdout and computes its metrics.
+        With prices, predicts every valid feature row supplied; passing training
+        history does not make those rows out-of-sample. No labelled metrics are
+        available for that path.
 
         Args:
             prices: Optional new price series to forecast.

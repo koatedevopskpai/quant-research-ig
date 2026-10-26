@@ -1,27 +1,18 @@
+"""Purged combinatorial supervised CV with inclusive label event intervals.
+
+Each fold fits a fresh model. Embargo excludes observations starting immediately
+after each held-out event interval. Folds may train on later observations, as
+combinatorial CV does; this is not a chronological live-trading simulation.
+Fold scores overlap and are not independent significance observations.
 """
-validation/cpcv.py — Combinatorial Purged Cross-Validation (CPCV)
 
-López de Prado (2018). CPCV extends standard CV to time series by:
-    1. Splitting the data into N groups (purged of leakage).
-    2. Selecting K groups for testing, the rest for training.
-    3. Purging training data within an embargo period before each test set.
-    4. Repeating across all C(N, K) combinations.
-
-This yields a distribution of out-of-sample performance metrics that
-is more robust than a single train/test split. The combinatorial
-approach ensures every observation appears in a test set multiple times,
-reducing the variance of the performance estimate.
-
-Key concepts:
-    - Purge: remove training observations within 'embargo' of test set
-    - Embargo: minimum gap between train and test to prevent leakage
-    - C(N, K): number of combinations (capped to max_combo for tractability)
-"""
+from dataclasses import dataclass
+from itertools import combinations
+from math import comb
+from numbers import Integral
 
 import numpy as np
-from itertools import combinations
-from dataclasses import dataclass, field
-from typing import Optional, Callable
+from quant_methods.validation._folds import evaluate_fold, event_ends, sharpe, supervised_data
 
 
 @dataclass
@@ -36,86 +27,116 @@ class CPCVResult:
     embargo: int
     n_combinations: int
     all_sharpes: list[float]
-    is_significant: bool
+    is_significant: bool  # always False: correlated folds do not establish significance
+    lower_quantile: float
+    positive_fold_fraction: float
+    fold_results: list[dict]
 
 
 class CombinatorialPurgedCV:
-    def __init__(self, n_groups: int = 10, n_test_groups: int = 2,
-                 embargo: int = 0, max_combinations: int = 100,
-                 periods_per_year: int = 252):
-        if n_test_groups >= n_groups:
-            raise ValueError(f"n_test_groups ({n_test_groups}) must be < n_groups ({n_groups})")
-        self.n_groups = n_groups
-        self.n_test_groups = n_test_groups
-        self.embargo = embargo
-        self.max_combinations = max_combinations
-        self.periods_per_year = periods_per_year
+    def __init__(
+        self,
+        n_groups=10,
+        n_test_groups=2,
+        embargo=0,
+        max_combinations=100,
+        periods_per_year=252,
+        random_state=42,
+    ):
+        if not all(
+            isinstance(v, Integral)
+            for v in (n_groups, n_test_groups, embargo, max_combinations, periods_per_year)
+        ):
+            raise ValueError("Fold counts, embargo and periods_per_year must be integers")
+        if not 1 <= n_test_groups < n_groups:
+            raise ValueError("n_test_groups must be >=1 and < n_groups")
+        if embargo < 0 or max_combinations < 1 or periods_per_year < 1:
+            raise ValueError("Invalid embargo, max_combinations or periods_per_year")
+        self.n_groups, self.n_test_groups = n_groups, n_test_groups
+        self.embargo, self.max_combinations = embargo, max_combinations
+        self.periods_per_year, self.random_state = periods_per_year, random_state
 
-    def _split_groups(self, n_obs: int) -> list[tuple[int, int]]:
-        group_size = n_obs // self.n_groups
-        remainder = n_obs % self.n_groups
-        groups = []
-        start = 0
-        for g in range(self.n_groups):
-            size = group_size + (1 if g < remainder else 0)
-            groups.append((start, start + size))
-            start += size
-        return groups
+    def _split_groups(self, n_obs):
+        groups = np.array_split(np.arange(n_obs), self.n_groups)
+        return [(int(group[0]), int(group[-1]) + 1) for group in groups]
 
-    def _purge_indices(self, test_start: int, test_end: int,
-                       n_obs: int) -> tuple[int, int]:
-        purge_before = max(0, test_start - self.embargo)
-        purge_after = min(n_obs, test_end + self.embargo)
-        return (purge_before, purge_after)
+    def _combinations(self):
+        total = comb(self.n_groups, self.n_test_groups)
+        if total <= self.max_combinations:
+            return list(combinations(range(self.n_groups), self.n_test_groups))
+        rng, selected = np.random.default_rng(self.random_state), set()
+        while len(selected) < self.max_combinations:
+            selected.add(
+                tuple(sorted(rng.choice(self.n_groups, self.n_test_groups, replace=False).tolist()))
+            )
+        return sorted(selected)
 
-    def run(self, strategy_returns: np.ndarray,
-            metric_fn: Optional[Callable[[np.ndarray], float]] = None,
-            significance_level: float = 0.05) -> CPCVResult:
-        returns = np.asarray(strategy_returns, dtype=float).flatten()
-        if len(returns) < self.n_groups * 2:
+    def split(self, x, *, label_end=None):
+        n = x if isinstance(x, Integral) else len(x)
+        if n < self.n_groups * 2:
             raise ValueError(f"Need >= {self.n_groups * 2} observations")
+        starts = np.arange(n)
+        ends = event_ends(n, label_end)
+        groups = self._split_groups(n)
+        for selected in self._combinations():
+            test_mask = np.zeros(n, dtype=bool)
+            train_mask = np.ones(n, dtype=bool)
+            for group in selected:
+                start, stop = groups[group]
+                test_mask[start:stop] = True
+                event_stop = int(ends[start:stop].max())
+                overlaps = (starts <= event_stop) & (ends >= start)
+                embargoed = (starts > event_stop) & (starts <= event_stop + self.embargo)
+                train_mask &= ~(overlaps | embargoed)
+            train_mask &= ~test_mask
+            train, test = starts[train_mask], starts[test_mask]
+            if len(train) < 2:
+                raise ValueError("Purging left fewer than two training observations")
+            yield train, test
 
-        def default_metric(r):
-            return r.mean() / r.std() * np.sqrt(self.periods_per_year) if r.std() > 0 else 0.0
+    def run(
+        self,
+        x,
+        y,
+        model_factory,
+        returns_fn,
+        *,
+        label_end=None,
+        metric_fn=None,
+        significance_level=0.05,
+    ):
+        """Fit each fold; returns_fn(realised_y, predictions) supplies net returns.
 
-        metric = metric_fn or default_metric
-        groups = self._split_groups(len(returns))
-        all_combos = list(combinations(range(self.n_groups), self.n_test_groups))
-        if len(all_combos) > self.max_combinations:
-            rng = np.random.default_rng(42)
-            all_combos = rng.choice(all_combos, self.max_combinations, replace=False).tolist()
-
-        sharpes = []
-        for test_groups in all_combos:
-            test_mask = np.zeros(len(returns), dtype=bool)
-            train_mask = np.ones(len(returns), dtype=bool)
-            for g in test_groups:
-                s, e = groups[g]
-                test_mask[s:e] = True
-                train_mask[s:e] = False
-                purge_before, purge_after = self._purge_indices(s, e, len(returns))
-                if purge_before < s:
-                    train_mask[purge_before:s] = False
-                if purge_after > e:
-                    train_mask[e:purge_after] = False
-            if train_mask.sum() < 10 or test_mask.sum() < 5:
-                continue
-            oos_sharpe = metric(returns[test_mask])
-            sharpes.append(oos_sharpe)
-
-        sharpes_arr = np.array(sharpes) if sharpes else np.array([0.0])
-        sr_mean = float(np.mean(sharpes_arr))
-        sr_std = float(np.std(sharpes_arr)) if len(sharpes_arr) > 1 else 0.0
+        All preprocessing must live inside model_factory's fitted model/pipeline.
+        significance_level selects a descriptive lower quantile, not a p-value.
+        """
+        if not 0 < significance_level < 1:
+            raise ValueError("significance_level must lie strictly between 0 and 1")
+        features, targets = supervised_data(x, y)
+        metric = metric_fn or (lambda r: sharpe(r, self.periods_per_year))
+        folds, scores = [], []
+        for train, test in self.split(features, label_end=label_end):
+            fold = evaluate_fold(features, targets, train, test, model_factory, returns_fn)
+            score = float(metric(fold["oos_returns"]))
+            if not np.isfinite(score):
+                raise ValueError("metric_fn must return a finite score")
+            fold["score"] = score
+            folds.append(fold)
+            scores.append(score)
+        values = np.asarray(scores)
         return CPCVResult(
-            sharpe_mean=sr_mean,
-            sharpe_std=sr_std,
-            sharpe_min=float(sharpes_arr.min()),
-            sharpe_max=float(sharpes_arr.max()),
-            sharpe_median=float(np.median(sharpes_arr)),
-            n_groups=self.n_groups,
-            n_test_groups=self.n_test_groups,
-            embargo=self.embargo,
-            n_combinations=len(sharpes),
-            all_sharpes=sharpes,
-            is_significant=sr_mean - 2 * sr_std > 0,
+            float(values.mean()),
+            float(values.std()),
+            float(values.min()),
+            float(values.max()),
+            float(np.median(values)),
+            self.n_groups,
+            self.n_test_groups,
+            self.embargo,
+            len(folds),
+            scores,
+            False,
+            float(np.quantile(values, significance_level)),
+            float(np.mean(values > 0)),
+            folds,
         )

@@ -1,0 +1,45 @@
+{
+  "python": "3.12.15",
+  "platform": "Windows-11-10.0.26300-SP0",
+  "processor": "AMD64 Family 25 Model 117 Stepping 2, AuthenticAMD",
+  "levels": 100,
+  "iterations": 4000,
+  "results": [
+    {
+      "implementation": "python",
+      "apply_diff": {
+        "median_us": 2.9,
+        "p99_us": 6.5,
+        "samples": 4000
+      },
+      "l1_snapshot": {
+        "median_us": 1.4,
+        "p99_us": 2.6,
+        "samples": 4000
+      },
+      "depth_summary": {
+        "median_us": 8.0,
+        "p99_us": 19.7,
+        "samples": 4000
+      }
+    },
+    {
+      "implementation": "cpp",
+      "apply_diff": {
+        "median_us": 0.9,
+        "p99_us": 1.7,
+        "samples": 4000
+      },
+      "l1_snapshot": {
+        "median_us": 2.7,
+        "p99_us": 14.3,
+        "samples": 4000
+      },
+      "depth_summary": {
+        "median_us": 2.4,
+        "p99_us": 4.5,
+        "samples": 4000
+      }
+    }
+  ]
+}

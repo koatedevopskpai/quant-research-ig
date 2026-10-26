@@ -180,6 +180,8 @@ class LSTMPredictor:
     def _prepare_data(
         self,
         prices: pd.Series,
+        *,
+        fit_end: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Convert price series into supervised learning sequences.
@@ -199,11 +201,17 @@ class LSTMPredictor:
             Tuple of (X, y) tensors for training.
         """
         # Log returns
-        log_ret = np.log(prices / prices.shift(1)).dropna().values.reshape(-1, 1)
+        values = np.asarray(prices, dtype=float)
+        if values.ndim != 1 or not np.isfinite(values).all() or np.any(values <= 0):
+            raise ValueError("prices must be a finite positive one-dimensional series")
+        log_ret = np.diff(np.log(values)).reshape(-1, 1)
+        if not 1 <= fit_end <= len(log_ret):
+            raise ValueError("fit_end must select a nonempty training return prefix")
 
         # Standardise
-        self._scaler_mean = float(np.mean(log_ret))
-        self._scaler_std = float(np.std(log_ret))
+        # fit_end includes training labels but excludes every validation target.
+        self._scaler_mean = float(np.mean(log_ret[:fit_end]))
+        self._scaler_std = float(np.std(log_ret[:fit_end]))
         if self._scaler_std < 1e-12:
             self._scaler_std = 1.0
         scaled = (log_ret - self._scaler_mean) / self._scaler_std
@@ -244,13 +252,13 @@ class LSTMPredictor:
         if isinstance(prices, pd.DataFrame):
             prices = prices["close"] if "close" in prices.columns else prices.iloc[:, 0]
 
-        X, y = self._prepare_data(prices)
-        n = len(X)
+        n = len(prices) - 1 - self.seq_len
         if n < 100:
             raise ValueError(f"Need at least 100 sequences, got {n}")
 
         # Walk-forward split (80/20 by time)
         split = int(n * 0.8)
+        X, y = self._prepare_data(prices, fit_end=self.seq_len + split)
         X_train, X_val = X[:split], X[split:]
         y_train, y_val = y[:split], y[split:]
 

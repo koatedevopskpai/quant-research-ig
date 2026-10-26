@@ -1,5 +1,10 @@
 #include "feed_handler.h"
 
+// WHY explicit: std::remove_if is used in unsubscribe(). MSVC pulls it in
+// through another header; libstdc++ (Linux CI) does not, which failed the
+// first Linux build with "'remove_if' is not a member of 'std'".
+#include <algorithm>
+
 namespace hft {
 
 MarketDataMessage parse_l1_update(
