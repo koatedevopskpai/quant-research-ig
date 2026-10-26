@@ -74,6 +74,7 @@ compile_commands.json
 # Testing & Coverage
 # =============================================================================
 .pytest_cache/
+test-results/
 htmlcov/
 .coverage
 .coverage.*

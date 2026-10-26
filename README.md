@@ -1,6 +1,6 @@
 # IG Market Data Project — Systematic Quant Trading Platform
 
-[![Python](https://img.shields.io/badge/python-3.14-blue)](https://www.python.org)
+[![Python](https://img.shields.io/badge/python-3.12-blue)](https://www.python.org)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Status](https://img.shields.io/badge/status-alpha-yellow)]()
 
@@ -9,10 +9,11 @@ are not a fresh coverage measurement. See the claim-sweep evidence for attempted
 test commands and their exact results.
 
 A reference collection of IG market-data integration code, quantitative research,
-execution simulation, ML models and agent components. The current full-suite
-attempt fails during collection; no passing total or coverage is asserted by this
-wording sweep. See [verification and blockers](evidence/W5-07.md). No live market,
-provider or trading-execution run was performed for this review.
+execution simulation, ML models and agent components. The Phase 1 workspace adds
+a Python 3.12 baseline, locked dependencies, credential-free tests, and CI.
+See [baseline setup and verification](docs/phase-1-baseline.md). Historical
+[claim-sweep evidence](evidence/W5-07.md) describes the earlier revision.
+Passing component tests do not establish live integration or strategy validity.
 
 Designed as a portfolio project demonstrating the quantitative researcher skill
 set: **data engineering, derivative pricing, statistical validation,
@@ -109,20 +110,22 @@ Analysis** (testing for parameter drift across regimes).
 git clone https://github.com/koatedevopskpai/quant-research-ig.git
 cd quant-research-ig
 
-# 2. Configure credentials
-cp .env.template .env
-# Edit .env with your IG API credentials (obtain from labs.ig.com)
+# 2. Install uv 0.13.5 (once; alternatively use the official uv installer)
+python -m pip install uv==0.13.5
 
-# 3. Install sub-modules
-pip install -e agentic-finance/
-pip install -e hft-engine/
+# 3. Install the locked Python 3.12 workspace and all five local packages
+uv sync --locked
 
-# 4. Run all tests
-pytest agentic-finance/tests/ hft-engine/tests/
-
-# 5. Regenerate coverage badges
-python .github/badges/generate_badges.py
+# 4. Check imports, collect, and run the credential-free suite
+uv run --locked python scripts/check_baseline.py
+uv run --locked pytest --collect-only -q
+uv run --locked pytest
 ```
+
+No `.env`, IG account, PostgreSQL service, or LLM key is needed for these tests.
+Configure `.env.template` only when explicitly running provider integrations.
+The baseline uses CPU PyTorch; the optional C++ extension is not built by this setup.
+See [Phase 1 notes](docs/phase-1-baseline.md) for CI, lock updates, and scope.
 
 ## Implementation Roadmap
 

@@ -146,17 +146,23 @@ class TestResearchAgent:
         result = agent.research(request, MockPrices())
         assert "error" in result.model_output
 
-    def test_llm_report_returns_fallback_on_no_key(self, agent):
+    def test_llm_report_returns_fallback_on_no_key(self, agent, monkeypatch):
         """When llm_api_key is None, _llm_report returns error message."""
         request = ResearchRequest(epic="EPIC", model_type="regime")
         output = {"key": "value"}
+        def no_credentials(*args, **kwargs):
+            raise RuntimeError("No API key supplied")
+        monkeypatch.setattr("openai.OpenAI", no_credentials)
         report = agent._llm_report(request, output)
         assert "LLM report unavailable" in report
 
-    def test_llm_report_with_bad_key_returns_error_message(self, agent_with_key):
+    def test_llm_report_with_bad_key_returns_error_message(self, agent_with_key, monkeypatch):
         """With an invalid API key, _llm_report returns an error message."""
         request = ResearchRequest(epic="EPIC", model_type="regime")
         output = {"key": "value"}
+        def rejected(*args, **kwargs):
+            raise RuntimeError("Mock provider rejected test credentials")
+        monkeypatch.setattr("openai.OpenAI", rejected)
         report = agent_with_key._llm_report(request, output)
         assert "[LLM report unavailable:" in report
 

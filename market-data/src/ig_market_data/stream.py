@@ -198,6 +198,7 @@ class IGStreamer:
             IG's Lightstreamer instance uses the DEFAULT adapter set.
             Passing None selects the default, which is the correct choice.
         """
+        self.settings.validate_credentials()
         cst, xst = self._fetch_v2_tokens()
         # WHY this specific password format:
         #   Lightstreamer's IG adapter expects the v2 credentials in the

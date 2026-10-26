@@ -171,14 +171,30 @@ class TestTickConsumer:
     # Connection management
     # ------------------------------------------------------------------
 
-    def test_connect_sets_connected(self) -> None:
+    def test_connect_sets_connected(self, monkeypatch) -> None:
         """connect() should set _connected even when IGStreamer unavailable."""
+        from types import ModuleType
+        import sys
+
+        stub = ModuleType("ig_market_data.stream")
+        def unavailable():
+            raise RuntimeError("offline fixture")
+        stub.IGStreamer = unavailable
+        monkeypatch.setitem(sys.modules, "ig_market_data.stream", stub)
         consumer = TickConsumer()
         consumer.subscribe("IX.D.FTSE.IFP.IP", lambda m: None)
         consumer.connect()
         assert consumer._connected is True
 
-    def test_disconnect_cleans_up(self) -> None:
+    def test_disconnect_cleans_up(self, monkeypatch) -> None:
+        from types import ModuleType
+        import sys
+
+        stub = ModuleType("ig_market_data.stream")
+        def unavailable():
+            raise RuntimeError("offline fixture")
+        stub.IGStreamer = unavailable
+        monkeypatch.setitem(sys.modules, "ig_market_data.stream", stub)
         consumer = TickConsumer()
         consumer.subscribe("EPIC", lambda m: None)
         consumer.connect()
