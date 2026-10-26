@@ -143,42 +143,49 @@ class AppState:
         self.portfolio = PortfolioAgent(self.bus, self.audit)
 
     def register_default_research_models(self) -> None:
-        """Register stub models so /research works without prior setup."""
-        import numpy as np
+        """
+        Register DEMO adapters so /research returns a well-formed response with
+        no credentials.
 
-        class DummyRegimeModel:
-            def fit(self, prices):
-                self.prices = prices
-                return self
-            def predict(self, prices=None):
-                if isinstance(getattr(self, 'prices', None), np.ndarray):
-                    return type('RegimeResult', (), {
-                        'regime_labels': [0, 1, 0, 1],
-                        'regime_probs': np.array([0.6, 0.4, 0.55, 0.45]),
-                    })()
-                return type('RegimeResult', (), {
-                    'regime_labels': [0, 1, 0, 1],
-                    'regime_probs': np.array([0.6, 0.4, 0.55, 0.45]),
-                })()
-        class DummyForecastModel:
-            def fit(self, prices):
-                self.prices = np.asarray(prices)
-                return self
-            def predict(self, prices=None):
-                pred = np.array([100.0] * 5)
-                return type('ForecastResult', (), {'forecast': pred})()
-        class DummyLSTMModel:
-            def fit(self, prices):
-                self.prices = np.asarray(prices)
-                return self
-            def predict(self, prices=None):
-                pred = np.array([100.0] * 5)
-                return type('ForecastResult', (), {'forecast': pred})()
+        These are not trained models: direction and confidence are fixed and
+        every output carries diagnostics["demo"] = True, so a client cannot
+        mistake the response for a forecast. The production runner registers the
+        real ForecastAdapter/RegimeAdapter instead of calling this.
+        """
+        from agentic_finance.model_contract import ModelOutput
 
-        self.research.register_model("regime", DummyRegimeModel())
-        self.research.register_model("forecast", DummyForecastModel())
-        self.research.register_model("lstm", DummyLSTMModel())
-        self.research.register_model("sentiment", DummyForecastModel())
+        class _DemoRegime:
+            name = "regime"
+
+            def fit(self, prices):
+                return self
+
+            def predict(self, prices):
+                return ModelOutput(
+                    model="regime", direction=0.0, confidence=0.0,
+                    regime=1, regime_label="Medium Vol (demo)",
+                    diagnostics={"demo": True},
+                )
+
+        def _demo_forecast(name: str):
+            class _DemoForecast:
+                def fit(self, prices):
+                    return self
+
+                def predict(self, prices):
+                    return ModelOutput(
+                        model=name, direction=1.0, confidence=0.25,
+                        expected_return=0.001,
+                        diagnostics={"demo": True, "n_forecasts": 0},
+                    )
+
+            _DemoForecast.name = name
+            return _DemoForecast()
+
+        self.research.register_model("regime", _DemoRegime())
+        self.research.register_model("forecast", _demo_forecast("forecast"))
+        self.research.register_model("lstm", _demo_forecast("lstm"))
+        self.research.register_model("sentiment", _demo_forecast("sentiment"))
 
 
 _state: AppState | None = None
