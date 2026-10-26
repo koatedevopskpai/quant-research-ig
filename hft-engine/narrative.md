@@ -105,7 +105,13 @@ update, insert, or delete. L2 books typically have 10-50 levels per side.
   comparison loop (no custom comparator needed).
 - Asks are sorted ascending, bids descending — binary search would require
   separate logic for each side.
-- Benchmark: 100-level linear scan completes in ~0.5 microseconds.
+- Benchmark (measured 2026-10-26, CPython 3.12.15, 100 levels, 4000 calls):
+  linear scan inside `apply_diff` costs 2.90 µs median in pure Python and
+  0.90 µs through the compiled C++ book (3.2×), both including the call
+  overhead at their respective boundaries. `l1_snapshot` is slower in C++
+  (2.7 µs vs 1.4 µs): the boundary dominates for a single scalar read.
+  Reproduce with `python benchmarks/bench_order_book.py`. The earlier
+  "~0.5 microseconds" figure was not measured and has been replaced.
 
 **Trade-offs**:
 - At K > 1000 levels (extreme), binary search would be ~100x faster.

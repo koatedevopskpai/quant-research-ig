@@ -77,5 +77,7 @@ Source: [`agentic-finance/narrative.md`](../agentic-finance/narrative.md)
 | Document | Purpose |
 |---|---|
 | [`phase-1-baseline.md`](phase-1-baseline.md) | Python 3.12 / uv baseline, CI and credential-free testing |
+| [`phase-2-validation.md`](phase-2-validation.md) | Sharpe inference, purged fold APIs, temporal isolation |
 | [`W5-07.md`](W5-07.md) | Claim-sweep: what was removed from the README and why |
 | [`../evidence/W5-07.md`](../evidence/W5-07.md) | Raw command output behind that sweep |
+| [`../evidence/R-03.md`](../evidence/R-03.md) | Independent verification of phases 1–2, defects found, C++ build |

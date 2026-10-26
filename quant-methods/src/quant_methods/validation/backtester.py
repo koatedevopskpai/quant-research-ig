@@ -59,9 +59,11 @@ class Backtester:
         elif weight_scheme == "signal":
             positions = aligned["signal"].clip(-1.0, 1.0)
         elif weight_scheme == "vol_target":
-            vol = pct_ret.rolling(20).std().fillna(pct_ret.std())
+            # Warm-up stays flat. Full-sample fallback volatility leaks future returns.
+            vol = pct_ret.rolling(20, min_periods=20).std()
             target = 0.15 / np.sqrt(self.periods_per_year)
-            positions = aligned["signal"].clip(-1.0, 1.0) * target / vol.clip(lower=1e-10)
+            positions = (aligned["signal"].clip(-1.0, 1.0) * target
+                         / vol.where(vol > 0)).fillna(0.0)
         else:
             raise ValueError(f"Unknown weight_scheme: {weight_scheme}")
         strategy_ret = pct_ret * positions.shift(1).fillna(0.0)

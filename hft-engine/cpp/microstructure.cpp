@@ -2,6 +2,8 @@
 #include "order_book.h"
 #include <cmath>
 #include <algorithm>
+// std::accumulate is used below; do not rely on microstructure.h including it.
+#include <numeric>
 
 namespace hft {
 

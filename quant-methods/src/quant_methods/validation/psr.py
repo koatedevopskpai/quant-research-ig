@@ -1,71 +1,83 @@
+"""PSR with per-observation inference and annualised public Sharpe values.
+
+Bailey & Lopez de Prado (2014), Eq. 2:
+https://www.davidhbailey.com/dhbpapers/deflated-sharpe.pdf
+Kurtosis is ordinary (Gaussian = 3), not excess. Returns must be finite,
+nonconstant, equally spaced observations. Serial dependence is not corrected.
 """
-validation/psr.py — Probabilistic Sharpe Ratio (PSR)
 
-Bailey & López de Prado (2012). The PSR answers: "Given my track record,
-what is the probability that the true Sharpe ratio exceeds a given
-threshold (typically 0)?"
-
-PSR(SR*) = Phi( (SR_hat - SR*) * sqrt(N-1) / sqrt(1 - gamma_3 * SR_hat + (gamma_4 - 1)/4 * SR_hat^2) )
-
-where:
-    SR_hat  = estimated Sharpe ratio (annualised)
-    SR*     = threshold Sharpe ratio (typically 0, or the risk-free)
-    N       = number of observations
-    gamma_3 = skewness of returns
-    gamma_4 = excess kurtosis of returns
-    Phi     = standard normal CDF
-
-The PSR penalises strategies with high skewness (right-tail risk) and
-negative skewness (losses cluster), and high kurtosis (fat tails).
-"""
+from dataclasses import dataclass
+from numbers import Integral
 
 import numpy as np
 from scipy import stats
-from dataclasses import dataclass
-from typing import Optional
+
+
+def probability_from_moments(sharpe, threshold, n, skewness, kurtosis):
+    """Return (probability, z) from per-observation Sharpe and ordinary moments."""
+    if not isinstance(n, Integral) or n < 3:
+        raise ValueError("Need >=3 observations")
+    if not np.isfinite([sharpe, threshold, skewness, kurtosis]).all() or kurtosis < 1:
+        raise ValueError("Sharpe values and moments must be finite; kurtosis must be >=1")
+    variance_term = 1 - skewness * sharpe + (kurtosis - 1) * sharpe**2 / 4
+    if variance_term <= 0:
+        raise ValueError("Sharpe sampling variance must be positive")
+    z = float((sharpe - threshold) * np.sqrt(n - 1) / np.sqrt(variance_term))
+    return float(stats.norm.cdf(z)), z
 
 
 @dataclass
 class PSRResult:
     psr: float
-    sharpe_ratio: float
-    threshold_sharpe: float
+    sharpe_ratio: float  # annualised, for reporting
+    threshold_sharpe: float  # annualised, for reporting
     skewness: float
-    kurtosis: float
+    kurtosis: float  # ordinary kurtosis
     n_observations: int
     is_significant: bool
     z_stat: float
 
 
 class ProbabilisticSharpeRatio:
-    def __init__(self, risk_free_rate: float = 0.0, periods_per_year: int = 252):
+    def __init__(self, risk_free_rate=0.0, periods_per_year=252):
+        if not isinstance(periods_per_year, Integral) or periods_per_year <= 0:
+            raise ValueError("periods_per_year must be a positive integer")
+        if not np.isfinite(risk_free_rate):
+            raise ValueError("risk_free_rate must be finite")
         self.risk_free_rate = risk_free_rate
         self.periods_per_year = periods_per_year
 
-    def compute(self, returns: np.ndarray,
-                threshold_sharpe: Optional[float] = None) -> PSRResult:
-        returns = np.asarray(returns, dtype=float).flatten()
-        if len(returns) < 3:
-            raise ValueError(f"Need >=3 observations, got {len(returns)}")
-        excess = returns - self.risk_free_rate / self.periods_per_year
-        sr = excess.mean() / excess.std() * np.sqrt(self.periods_per_year) if excess.std() > 0 else 0.0
-        if threshold_sharpe is None:
-            threshold_sharpe = self.risk_free_rate
-        skew = float(stats.skew(returns))
-        kurt = float(stats.kurtosis(returns, fisher=True))
-        n = len(returns)
-        num = (sr - threshold_sharpe) * np.sqrt(n - 1)
-        var_term = 1 - skew * sr + (kurt - 1) / 4 * sr ** 2
-        denom = np.sqrt(max(var_term, 1e-10))
-        z = float(num / denom)
-        psr_val = float(stats.norm.cdf(z))
+    def compute(self, returns, threshold_sharpe=None, *, significance_level=0.05):
+        """Test against an annualised Sharpe benchmark (default 0, above RF).
+
+        RF is an annual arithmetic return, subtracted as RF/periods_per_year.
+        The sample standard deviation uses ddof=1; central moments use the
+        empirical population-moment convention (scipy bias=True).
+        """
+        values = np.asarray(returns, dtype=float)
+        if values.ndim != 1 or len(values) < 3:
+            raise ValueError("Need >=3 observations in a one-dimensional return series")
+        if not np.isfinite(values).all():
+            raise ValueError("returns must be finite")
+        threshold = 0.0 if threshold_sharpe is None else float(threshold_sharpe)
+        if not np.isfinite(threshold) or not 0 < significance_level < 1:
+            raise ValueError("Invalid threshold or significance_level")
+        excess = values - self.risk_free_rate / self.periods_per_year
+        volatility = float(excess.std(ddof=1))
+        if volatility <= 0:
+            raise ValueError("Sharpe inference requires nonconstant returns")
+        sr = float(excess.mean() / volatility)
+        skew = float(stats.skew(excess, bias=True))
+        kurt = float(stats.kurtosis(excess, fisher=False, bias=True))
+        scale = np.sqrt(self.periods_per_year)
+        probability, z = probability_from_moments(sr, threshold / scale, len(values), skew, kurt)
         return PSRResult(
-            psr=psr_val,
-            sharpe_ratio=sr,
-            threshold_sharpe=threshold_sharpe,
-            skewness=skew,
-            kurtosis=kurt,
-            n_observations=n,
-            is_significant=psr_val >= 0.95,
-            z_stat=z,
+            probability,
+            sr * scale,
+            threshold,
+            skew,
+            kurt,
+            len(values),
+            bool(probability >= 1 - significance_level),
+            z,
         )
