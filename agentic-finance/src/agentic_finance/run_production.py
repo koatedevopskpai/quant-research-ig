@@ -104,6 +104,8 @@ class ProductionRunner:
 
         # Epics
         self.epics = list(EPICS)
+        self._regimes: dict[str, int] = {}
+        self._entry_regimes: dict[str, int] = {}
 
         # HFT pipeline — one book, one analyser and one price history PER EPIC.
         # Sharing them was a data-corruption defect: feeding instrument A at
@@ -124,6 +126,7 @@ class ProductionRunner:
         self.execution_agent = ExecutionAgent(
             self.message_bus, self.audit_trail,
             initial_capital=INITIAL_CAPITAL, store=self._store,
+            max_holding_seconds=3600.0,
         )
         self.risk_manager = RiskManager(
             self.message_bus, self.audit_trail,
@@ -192,6 +195,7 @@ class ProductionRunner:
                                    self._on_research_completed)
         self.message_bus.subscribe("risk.halted", self._on_risk_halted)
         self.message_bus.subscribe("risk.resumed", self._on_risk_resumed)
+        self.message_bus.subscribe("position.closed", self._on_position_closed)
 
     # ── Market data callback ────────────────────────────────────────
 
@@ -307,6 +311,22 @@ class ProductionRunner:
         logger.warning("RISK RESUME requested")
         self.execution_agent.resume()
 
+    def _on_position_closed(self, msg) -> None:
+        """
+        Feed a realised close back into the regime transition matrix.
+
+        This is the RL loop: the regime at entry, the regime at exit and the
+        realised P&L determine one bounded update (see adaptive_hmm.py).
+        """
+        payload = msg.payload or {}
+        epic = payload.get("epic", "")
+        pnl = float(payload.get("realized_pnl", 0.0))
+        previous = self._entry_regimes.pop(epic, self._regimes.get(epic, 0))
+        current = self._regimes.get(epic, previous)
+        if self.research_agent.record_outcome(epic, previous, current, pnl):
+            logger.info("Adapted regime transition %s: %d -> %d (pnl=%.2f)",
+                        epic, previous, current, pnl)
+
     # ── Periodic tasks ──────────────────────────────────────────────
 
     def _run_research(self) -> None:
@@ -340,6 +360,14 @@ class ProductionRunner:
                 min_confidence=MIN_SIGNAL_CONFIDENCE,
             )
             order = final.get("order")
+            research = final.get("research") or {}
+            regime = research.get("regime")
+            if regime is not None:
+                self._regimes[epic] = int(regime)
+                if (order and order.get("status") in ("filled", "partially_filled")
+                        and epic not in self._entry_regimes):
+                    self._entry_regimes[epic] = int(regime)
+
             logger.info(
                 "Graph %s: allowed=%s order=%s reason=%s",
                 epic, final.get("allowed"),

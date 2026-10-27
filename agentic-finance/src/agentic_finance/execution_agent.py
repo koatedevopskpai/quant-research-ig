@@ -77,7 +77,10 @@ class ExecutionAgent:
                  slippage_bps: float = 0.0,
                  fill_ratio: float = 1.0,
                  min_order_notional: float = 1.0,
-                 store: Any = None):
+                 store: Any = None,
+                 toxicity_exit_threshold: float = 0.8,
+                 max_holding_seconds: float | None = None,
+                 clock: Any = None):
         self.message_bus = message_bus
         self.audit_trail = audit_trail
         self.capital = initial_capital
@@ -85,6 +88,10 @@ class ExecutionAgent:
         self.default_stop_loss_pct = default_stop_loss_pct
         self.fill_ratio = fill_ratio
         self.min_order_notional = min_order_notional
+        self.toxicity_exit_threshold = float(toxicity_exit_threshold)
+        self.max_holding_seconds = max_holding_seconds
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._entry_time: dict[str, datetime] = {}
         if not 0 < fill_ratio <= 1:
             raise ValueError("fill_ratio must be in (0, 1]")
 
@@ -367,6 +374,10 @@ class ExecutionAgent:
         if chunk <= 0:
             return None
 
+        prior = self.ledger.positions.get(order.epic)
+        prior_qty = prior.quantity if prior else 0.0
+        prior_avg = prior.avg_price if prior else 0.0
+
         fill = self.ledger.apply_fill(
             order.epic, order.side, chunk, price,
             order_id=order.order_id,
@@ -382,11 +393,34 @@ class ExecutionAgent:
 
         self._marks[order.epic] = price
         position = self.ledger.positions.get(order.epic)
+        now = self._clock()
         if position and not position.is_flat:
+            # A new (or reversed) position starts its holding clock here.
+            if abs(prior_qty) < 1e-9 or (prior_qty > 0) != (position.quantity > 0):
+                self._entry_time[order.epic] = now
             # Remember the protective levels for the side actually held.
             held_side = "buy" if position.quantity > 0 else "sell"
             if order.side == held_side and order.stop_loss is not None:
                 self._protective[order.epic] = (order.stop_loss, order.take_profit)
+        else:
+            self._entry_time.pop(order.epic, None)
+
+        # If this fill reduced or reversed an existing position, report the
+        # realised part so the research loop can adapt the regime transition
+        # matrix from the outcome.
+        closing = 0.0
+        if abs(prior_qty) > 1e-9 and ((prior_qty > 0) != (order.side == "buy")):
+            closing = min(abs(prior_qty), fill.quantity)
+        if closing > 0:
+            realised = closing * (
+                (fill.price - prior_avg) if prior_qty > 0 else (prior_avg - fill.price)
+            )
+            self.message_bus.publish_topic(
+                "position.closed", "ExecutionAgent",
+                {"epic": order.epic, "closed_quantity": float(closing),
+                 "realized_pnl": float(realised), "reason": order.reason,
+                 "order_id": order.order_id},
+            )
 
         self.message_bus.publish_topic(
             "order.filled", "ExecutionAgent",
@@ -416,27 +450,61 @@ class ExecutionAgent:
         if position is None or position.is_flat:
             return triggered
 
-        stop, take = self._protective.get(epic, (None, None))
-        if stop is None and take is None:
+        reason = self._exit_reason(epic, position, price)
+        if reason is None:
             return triggered
 
-        long = position.quantity > 0
-        hit_stop = stop is not None and ((long and price <= stop) or (not long and price >= stop))
-        hit_take = take is not None and ((long and price >= take) or (not long and price <= take))
-        if not (hit_stop or hit_take):
-            return triggered
-
-        reason = "stop_loss" if hit_stop else "take_profit"
         closing = Order(
             epic=epic,
-            side="sell" if long else "buy",
+            side="sell" if position.quantity > 0 else "buy",
             size=abs(position.quantity),
             order_type="market",
             timestamp=datetime.now(timezone.utc),
-            reasoning=f"{reason} exit: price={price:.4f}, level={stop if hit_stop else take:.4f}",
+            reasoning=f"{reason} exit at {price:.4f}",
             reason=reason,
         )
         self._submit(closing, price, reason=reason)
         self._protective.pop(epic, None)
+        self._entry_time.pop(epic, None)
         triggered.append(closing)
         return triggered
+
+    def _exit_reason(self, epic: str, position: Any, price: float) -> str | None:
+        """
+        First applicable exit, in priority order.
+
+        Protective levels take precedence over toxicity, which takes precedence
+        over elapsed time: a stop is a hard risk limit, a toxicity spike is a
+        market-state judgement, and a time exit is housekeeping.
+        """
+        long = position.quantity > 0
+        stop, take = self._protective.get(epic, (None, None))
+
+        if stop is not None and (
+            (long and price <= stop) or (not long and price >= stop)
+        ):
+            return "stop_loss"
+        if take is not None and (
+            (long and price >= take) or (not long and price <= take)
+        ):
+            return "take_profit"
+
+        toxicity = self._current_toxicity()
+        if toxicity is not None and toxicity >= self.toxicity_exit_threshold:
+            return "toxicity_spike"
+
+        if self.max_holding_seconds is not None:
+            opened = self._entry_time.get(epic)
+            if opened is not None:
+                held = (self._clock() - opened).total_seconds()
+                if held >= self.max_holding_seconds:
+                    return "time_exit"
+        return None
+
+    def _current_toxicity(self) -> float | None:
+        if self._toxicity_detector is None:
+            return None
+        try:
+            return float(self._toxicity_detector.predict().toxicity)
+        except Exception:  # noqa: BLE001 - detector may be unfitted
+            return None
