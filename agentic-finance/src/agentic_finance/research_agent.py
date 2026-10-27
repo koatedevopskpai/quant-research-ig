@@ -246,6 +246,38 @@ class ResearchAgent:
             self._publish(request, output, summary)
         return result
 
+    def record_outcome(self, epic: str, prev_regime: int, next_regime: int,
+                       pnl: float) -> bool:
+        """
+        Feed a realised trade outcome back into the regime transition matrix.
+
+        WHY HERE: the regime adapter owns the HMM; the agent owns the audit. The
+        update is a reward-modulated bandit step (see adaptive_hmm.py), not a
+        full policy-gradient loop.
+        """
+        adapter = self._models.get("regime")
+        if adapter is None or not hasattr(adapter, "learn"):
+            return False
+        try:
+            applied = adapter.learn(int(prev_regime), int(next_regime), float(pnl))
+        except Exception:  # noqa: BLE001 - a bad outcome must not break the loop
+            return False
+        if not applied:
+            return False
+
+        decision = Decision.now(
+            agent="ResearchAgent",
+            decision_type=DecisionType.RESEARCH,
+            description=f"Regime transition adapted for {epic}",
+            context={"prev_regime": int(prev_regime),
+                     "next_regime": int(next_regime),
+                     "realized_pnl": float(pnl)},
+            reasoning="Reward-modulated HMM transition update",
+        )
+        decision.status = DecisionStatus.EXECUTED
+        self.audit_trail.record(decision, tags=["research", "rl_update", epic])
+        return True
+
     def _llm_report(self, request: ResearchRequest, output: dict[str, Any]) -> str:
         try:
             import openai

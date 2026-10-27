@@ -50,9 +50,9 @@ class RegimeAdapter:
 
     def _model(self):
         if self._detector is None:
-            from ml_for_finance.regime.hmm_detector import HMMRegimeDetector
+            from ml_for_finance.regime.adaptive_hmm import AdaptiveHMMRegimeDetector
 
-            self._detector = HMMRegimeDetector(n_regimes=self._n_regimes)
+            self._detector = AdaptiveHMMRegimeDetector(n_regimes=self._n_regimes)
         return self._detector
 
     def _features(self, prices: pd.Series) -> np.ndarray:
@@ -86,6 +86,28 @@ class RegimeAdapter:
                 "observations": len(features),
             },
         )
+
+    # ------------------------------------------------------------------
+    # Reward-modulated adaptation
+    # ------------------------------------------------------------------
+
+    def learn(self, prev_state: int, next_state: int, reward: float) -> bool:
+        """
+        Update the HMM transition matrix from a realised trade outcome.
+
+        The detector must have been fitted (it is, after every research call).
+        Returns False when the wrapped detector has no adaptation support.
+        """
+        model = self._model()
+        if not hasattr(model, "adapt"):
+            return False
+        model.adapt(int(prev_state), int(next_state), float(reward))
+        return True
+
+    @property
+    def transition_matrix(self):
+        model = self._model()
+        return getattr(model, "transition_matrix", None)
 
 
 class ForecastAdapter:
