@@ -124,14 +124,14 @@ MSVC 19.51 for the C++ job. No `.env`, IG session, database or LLM key.
 |---|---|
 | `uv run --locked python scripts/check_baseline.py` | all five distributions import |
 | `uv run --locked python scripts/check_validation.py` | published DSR reference `0.9003968344` |
-| `uv run --locked pytest` | **604 passed**, 24 skipped (C++ extension unbuilt) |
-| `uv run --locked pytest` after `build_cpp` | **628 passed**, 0 skipped |
+| `uv run --locked pytest` | **628 passed**, 30 skipped (C++ extension unbuilt) |
+| `uv run --locked pytest` after `build_cpp` | **634 passed**, 0 skipped |
 
 | Module | Tests |
 |---|---|
 | `market-data` | 63 |
 | `quant-methods` | 128 |
-| `hft-engine` | 157 (24 need the compiled extension) |
+| `hft-engine` | 163 (24 + 6 need the compiled extension) |
 | `ml-for-finance` | 25 |
 | `agentic-finance` | 255 |
 
@@ -265,9 +265,11 @@ here:
   [`ADR-004`](hft-engine/narrative.md#adr-004-hawkes11-over-bayesian-for-toxicity)
   records why this is Hawkes rather than Downing's Bayesian formulation.
 - **C++ hot-path structures via pybind11** — sorted-vector L1/L2 book, string
-  field tick parsers, microstructure aggregates. Single-threaded, called from
-  Python; [`ADR-002`](hft-engine/narrative.md#adr-002-linear-search-for-price-level-index-k--100)
-  covers the data-structure choice.
+  field tick parsers, microstructure aggregates, plus a lock-free SPSC handoff
+  and lock-free snapshot readers over a single-writer book. The GIL is released
+  on book calls; [`ADR-002`](hft-engine/narrative.md#adr-002-linear-search-for-price-level-index-k--100)
+  covers the level search and [`docs/lockfree-cpp.md`](docs/lockfree-cpp.md) the
+  concurrency contract.
 - **Stop-loss / take-profit sizing** in the execution agent.
 
 **Not implemented, and not claimed:** reinforcement-learning adaptation of the
@@ -304,7 +306,7 @@ strategy has yet been promoted through them end to end (phase 8).
 | **API auth** | IG API v3 OAuth 2.0 Bearer tokens | v3 returns `oauthToken.access_token` (1800 s TTL, refreshed at 1400 s). Lightstreamer still requires the legacy v2 CST/XST pair; `stream.py` documents this. |
 | **Real-time streaming** | Provider layer over Lightstreamer (IG), Binance WebSocket, Dukascopy files, and JSONL replay | Adapters and field mapping are fixed and test-covered; the IG transport is unverified while the account is suspended. IG has no depth feed — L2 comes from Binance. See [`docs/phase-3-market-data.md`](docs/phase-3-market-data.md). |
 | **Quant research** | Python-first (pandas, numpy, scipy) | Rapid iteration; broad financial computing ecosystem. |
-| **Hot-path performance** | C++ via pybind11 | Sorted-vector L2 book + tick parsers, single-threaded, called from Python. Measured on a 100-level book: `apply_diff` 0.9 µs vs 2.9 µs in Python (3.2×); `l1_snapshot` is **slower** in C++ (2.7 vs 1.4 µs) because the boundary dominates. See [`benchmarks/`](benchmarks/bench_order_book.py). |
+| **Hot-path performance** | C++ via pybind11 | Sorted-vector L2 book with **lock-free snapshot readers** (seqlock) and a **lock-free SPSC handoff**; single writer, GIL released on book calls. Measured: 4.6 ns/message handoff, 60.4 ns/update, 0 torn snapshots under stress; `apply_diff` 0.9 µs vs 2.9 µs in Python, while `l1_snapshot` is slower through the boundary. See [`docs/lockfree-cpp.md`](docs/lockfree-cpp.md). |
 | **Strategy validation** | PSR, DSR, purged model CV, walk-forward refits | Tools implemented and reference-tested; automatic promotion gates are phase 8. |
 | **Agent orchestration** | Plain-Python agent classes over an in-process `MessageBus` | Research → Risk → Portfolio → Execution, every transition written to an `AuditTrail`. `openai` (`gpt-4o-mini`) is optional in the research agent. **No LangGraph dependency.** |
 
@@ -362,9 +364,9 @@ phases 1–2. Each is assigned to the phase that will fix it.
   publication to a debug-only, allow-listed namespace. `/health` and `/research`
   identify demo models. Residual: WebSocket auth uses a header (not usable from a
   browser), and there is no rate limiting or TLS — put it behind a proxy.
-- **Claims not implemented** — no LangGraph, no reinforcement learning, no
-  toxicity-spike or time-based exits, and the C++ layer is a sorted vector, not
-  lock-free, without GIL release.
+- **Claims not implemented** — no LangGraph dependency yet (planned for the
+  orchestration layer), no reinforcement learning, and no toxicity-spike or
+  time-based exits.
 
 ---
 
@@ -381,6 +383,8 @@ phases 1–2. Each is assigned to the phase that will fix it.
 | [`evidence/replay-baseline.json`](evidence/replay-baseline.json) | Deterministic replay: invariant and reconciliation report |
 | [`evidence/replay-halt.json`](evidence/replay-halt.json) | Adverse-shock replay: halt, zero entries after halt |
 | [`evidence/experiment.json`](evidence/experiment.json) | Phase 8 experiment report, holdout metrics and gate results |
+| [`evidence/lockfree-bench.txt`](evidence/lockfree-bench.txt) | Lock-free handoff/snapshot stress and benchmark output |
+| [`docs/lockfree-cpp.md`](docs/lockfree-cpp.md) | What is lock-free, memory ordering, measured results, limits |
 | [`docs/persistence.md`](docs/persistence.md) | Durable state: what survives a restart and what does not |
 | [`evidence/W5-07.md`](evidence/W5-07.md) | Historical claim sweep on the earlier revision |
 

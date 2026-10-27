@@ -23,3 +23,20 @@ set_target_properties(hft_cpp PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CMAKE_SOURCE_DIR}/../src/hft_engine"
     LIBRARY_OUTPUT_DIRECTORY_DEBUG "${CMAKE_SOURCE_DIR}/../src/hft_engine"
 )
+
+# Concurrency stress and microbenchmark targets. Off by default; CI builds the
+# stress target with ThreadSanitizer.
+option(HFT_BUILD_STRESS "Build the concurrency stress test and benchmark" OFF)
+if(HFT_BUILD_STRESS)
+    find_package(Threads REQUIRED)
+    add_executable(hft_stress tests/stress.cpp)
+    add_executable(hft_bench tests/bench_lockfree.cpp)
+    foreach(the_target hft_stress hft_bench)
+        target_include_directories(${the_target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        target_link_libraries(${the_target} PRIVATE Threads::Threads)
+        set_target_properties(${the_target} PROPERTIES
+            CXX_STANDARD 17
+            CXX_STANDARD_REQUIRED ON
+        )
+    endforeach()
+endif()

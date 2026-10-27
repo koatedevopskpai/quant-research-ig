@@ -4,9 +4,23 @@
 #include "order_book.h"
 #include "feed_handler.h"
 #include "microstructure.h"
+#include "spsc_ring.h"
+#include "concurrent_book.h"
 
 namespace py = pybind11;
 namespace hft {
+
+// A fixed-size, trivially copyable message for the lock-free handoff. Strings
+// and parsing stay outside the queue: allocation inside a "lock-free" path
+// would undermine the claim.
+struct RingTick {
+    std::int64_t ts_ns{0};
+    double bid{0.0};
+    double ask{0.0};
+    double size{0.0};
+};
+
+using TickRing = SpscRing<RingTick, 4096>;
 
 PYBIND11_MODULE(hft_cpp, m) {
     m.doc() = "HFT Engine C++ hot-path accelerators";
@@ -143,6 +157,54 @@ PYBIND11_MODULE(hft_cpp, m) {
         .def_readwrite("last_size", &MarketDataMessage::last_size)
         .def_readwrite("timestamp_ns", &MarketDataMessage::timestamp_ns)
         .def_readwrite("raw", &MarketDataMessage::raw);
+
+    // ── Lock-free handoff and concurrent snapshots ─────────────────────────
+    py::class_<ConcurrentOrderBook>(m, "ConcurrentOrderBook")
+        .def(py::init<>())
+        .def("apply_l1", &ConcurrentOrderBook::apply_l1,
+             py::arg("bid"), py::arg("ask"),
+             py::arg("bid_size") = 0.0, py::arg("ask_size") = 0.0,
+             py::call_guard<py::gil_scoped_release>())
+        .def("apply_diff", &ConcurrentOrderBook::apply_diff,
+             py::arg("side"), py::arg("price"), py::arg("size"),
+             py::arg("order_count") = 0,
+             py::call_guard<py::gil_scoped_release>())
+        .def("snapshot_l1", [](const ConcurrentOrderBook& book) {
+            L1Snapshot snapshot(0.0, 0.0, 0.0, 0.0);
+            if (!book.snapshot_l1(snapshot)) {
+                throw std::runtime_error("no consistent L1 snapshot available");
+            }
+            return snapshot;
+        }, py::call_guard<py::gil_scoped_release>())
+        .def("snapshot_l2", [](const ConcurrentOrderBook& book,
+                               std::int64_t max_levels) {
+            L2Snapshot snapshot(std::vector<PriceLevel>{},
+                                std::vector<PriceLevel>{}, 0.0);
+            if (!book.snapshot_l2(max_levels, snapshot)) {
+                throw std::runtime_error("no consistent L2 snapshot available");
+            }
+            return snapshot;
+        }, py::arg("max_levels") = 0, py::call_guard<py::gil_scoped_release>())
+        .def("updates", &ConcurrentOrderBook::updates)
+        .def("snapshots", &ConcurrentOrderBook::snapshots)
+        .def("retries", &ConcurrentOrderBook::retries);
+
+    py::class_<TickRing>(m, "TickRing")
+        .def(py::init<>())
+        .def("try_push", [](TickRing& ring, std::int64_t ts_ns, double bid,
+                            double ask, double size) {
+            return ring.try_push(RingTick{ts_ns, bid, ask, size});
+        }, py::arg("ts_ns"), py::arg("bid"), py::arg("ask"), py::arg("size"),
+           py::call_guard<py::gil_scoped_release>())
+        .def("try_pop", [](TickRing& ring) -> py::object {
+            RingTick tick;
+            if (!ring.try_pop(tick)) {
+                return py::none();
+            }
+            return py::make_tuple(tick.ts_ns, tick.bid, tick.ask, tick.size);
+        })
+        .def("size", &TickRing::size)
+        .def_static("capacity", []() { return TickRing::capacity(); });
 }
 
 } // namespace hft

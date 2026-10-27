@@ -117,3 +117,4 @@ docker-compose.override.yml
 
 # Persisted paper-trading state (SQLite)
 state/
+hft-engine/cpp/build-*/
