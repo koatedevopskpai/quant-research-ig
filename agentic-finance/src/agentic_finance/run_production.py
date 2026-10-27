@@ -71,6 +71,7 @@ from hft_engine.execution.simulator import ExecutionSimulator
 # ── Agents ──────────────────────────────────────────────────────────
 from agentic_finance.research_agent import ResearchAgent
 from agentic_finance.model_adapters import ForecastAdapter, RegimeAdapter
+from agentic_finance.graph import build_trading_graph, run_signal
 from agentic_finance.execution_agent import ExecutionAgent, Signal
 from agentic_finance.risk_manager import RiskManager
 from agentic_finance.portfolio_agent import PortfolioAgent
@@ -136,6 +137,7 @@ class ProductionRunner:
         # Timing state
         self._last_research_time: float = 0.0
         self._last_risk_check_time: float = 0.0
+        self._graph = None  # compiled on first research after models are registered
 
         if self._store is not None:
             restored = self.execution_agent.restore()
@@ -312,6 +314,11 @@ class ProductionRunner:
         import numpy as np
         import pandas as pd
 
+        if self._graph is None:
+            self._graph = build_trading_graph(
+                self.research_agent, self.risk_manager, self.execution_agent
+            )
+
         researched = 0
         for epic in self.epics:
             cache = self._price_caches[epic]
@@ -328,8 +335,16 @@ class ProductionRunner:
             )
             prices = pd.Series(np.asarray(cache, dtype=float), index=index)
 
-            result = self.research_agent.research_signal(epic, prices)
-            logger.info("Research signal for %s: %s", epic, str(result.summary)[:160])
+            final = run_signal(
+                self._graph, epic, prices, float(prices.iloc[-1]),
+                min_confidence=MIN_SIGNAL_CONFIDENCE,
+            )
+            order = final.get("order")
+            logger.info(
+                "Graph %s: allowed=%s order=%s reason=%s",
+                epic, final.get("allowed"),
+                (order or {}).get("order_id"), final.get("reason"),
+            )
             researched += 1
 
         if researched == 0:
