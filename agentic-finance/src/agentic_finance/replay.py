@@ -42,6 +42,7 @@ from agentic_finance.message_bus import MessageBus
 from agentic_finance.model_contract import ModelOutput
 from agentic_finance.research_agent import ResearchAgent
 from agentic_finance.risk_manager import RiskManager
+from agentic_finance.graph import build_trading_graph, run_signal
 from hft_engine.book.order_book import OrderBook
 from ig_market_data.providers.base import MarketEvent
 
@@ -231,6 +232,7 @@ def run_replay(events: Iterable[MarketEvent],
     research = ResearchAgent(bus, audit)
     research.register_model("forecast", MomentumAdapter())
     research.register_model("regime", VolatilityRegimeAdapter())
+    graph = build_trading_graph(research, risk, execution)
 
     books = {epic: OrderBook() for epic in epics}
     histories: dict[str, list[float]] = {epic: [] for epic in epics}
@@ -258,25 +260,17 @@ def run_replay(events: Iterable[MarketEvent],
         # Protective exits and partial-fill completion on every tick.
         execution.on_price(event.epic, price)
 
-        if (risk.can_trade() and execution.is_active
-                and index % config.research_every == 0
+        if (index % config.research_every == 0
                 and len(histories[event.epic]) >= 30):
             series = pd.Series(
                 histories[event.epic],
                 index=pd.date_range(end=pd.Timestamp("2026-01-01", tz="UTC"),
                                     periods=len(histories[event.epic]), freq="min"),
             )
-            output = research.research_signal(event.epic, series).model_output
-            if "error" not in output:
-                direction = float(output.get("direction", 0.0))
-                confidence = float(output.get("confidence", 0.0))
-                if direction != 0.0 and confidence >= config.min_confidence:
-                    execution.process_signal(
-                        Signal(epic=event.epic, direction=direction,
-                               confidence=confidence, source="replay"),
-                        price,
-                    )
-
+            # The graph owns the risk gate: research always runs on cadence,
+            # and the conditional edge decides whether execution happens.
+            run_signal(graph, event.epic, series, price,
+                       min_confidence=config.min_confidence)
         if index % config.risk_every == 0:
             risk.kill_if_needed()
 

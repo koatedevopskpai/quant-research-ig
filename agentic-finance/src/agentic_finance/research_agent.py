@@ -214,7 +214,7 @@ class ResearchAgent:
         return result
 
     def research_signal(self, epic: str, prices: Any,
-                        request_id: str = "") -> ResearchResult:
+                        request_id: str = "", publish: bool = True) -> ResearchResult:
         """
         Combine forecast and regime into one directional signal.
 
@@ -240,7 +240,10 @@ class ResearchAgent:
             request_id=request_id,
         )
         self._record(request, output, summary, llm_report)
-        self._publish(request, output, summary)
+        if publish:
+            # The graph owns the decision to act, so it suppresses the bus
+            # message and executes explicitly. External callers keep the message.
+            self._publish(request, output, summary)
         return result
 
     def _llm_report(self, request: ResearchRequest, output: dict[str, Any]) -> str:

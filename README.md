@@ -124,8 +124,8 @@ MSVC 19.51 for the C++ job. No `.env`, IG session, database or LLM key.
 |---|---|
 | `uv run --locked python scripts/check_baseline.py` | all five distributions import |
 | `uv run --locked python scripts/check_validation.py` | published DSR reference `0.9003968344` |
-| `uv run --locked pytest` | **628 passed**, 30 skipped (C++ extension unbuilt) |
-| `uv run --locked pytest` after `build_cpp` | **634 passed**, 0 skipped |
+| `uv run --locked pytest` | **610 passed**, 30 skipped (C++ extension unbuilt) |
+| `uv run --locked pytest` after `build_cpp` | **640 passed**, 0 skipped |
 
 | Module | Tests |
 |---|---|
@@ -133,7 +133,7 @@ MSVC 19.51 for the C++ job. No `.env`, IG session, database or LLM key.
 | `quant-methods` | 128 |
 | `hft-engine` | 163 (24 + 6 need the compiled extension) |
 | `ml-for-finance` | 25 |
-| `agentic-finance` | 255 |
+| `agentic-finance` | 261 |
 
 Live read-only provider checks (see [`docs/phase-3-market-data.md`](docs/phase-3-market-data.md)):
 Binance `BTCUSDT` delivered 5,453 L2 events and 676 trades in 15 s. IG is
@@ -308,7 +308,7 @@ strategy has yet been promoted through them end to end (phase 8).
 | **Quant research** | Python-first (pandas, numpy, scipy) | Rapid iteration; broad financial computing ecosystem. |
 | **Hot-path performance** | C++ via pybind11 | Sorted-vector L2 book with **lock-free snapshot readers** (seqlock) and a **lock-free SPSC handoff**; single writer, GIL released on book calls. Measured: 4.6 ns/message handoff, 60.4 ns/update, 0 torn snapshots under stress; `apply_diff` 0.9 µs vs 2.9 µs in Python, while `l1_snapshot` is slower through the boundary. See [`docs/lockfree-cpp.md`](docs/lockfree-cpp.md). |
 | **Strategy validation** | PSR, DSR, purged model CV, walk-forward refits | Tools implemented and reference-tested; automatic promotion gates are phase 8. |
-| **Agent orchestration** | Plain-Python agent classes over an in-process `MessageBus` | Research → Risk → Portfolio → Execution, every transition written to an `AuditTrail`. `openai` (`gpt-4o-mini`) is optional in the research agent. **No LangGraph dependency.** |
+| **Agent orchestration** | LangGraph `StateGraph` over the four agents | Research → Risk → Portfolio → Execution with a conditional halt edge; every node's work is recorded by the agent in the `AuditTrail`. The graph is deterministic (no LLM inside it). See [`docs/langgraph.md`](docs/langgraph.md). |
 
 ---
 
@@ -320,7 +320,7 @@ strategy has yet been promoted through them end to end (phase 8).
 | `quant-methods` | 1–2 | Pricing, GARCH, portfolio optimisation, and the reference-tested validation suite. |
 | `hft-engine` | 1–2 | Python book/feeds/microstructure plus a compiled C++ accelerator: order book, tick parsers, toxicity detector, execution/colocation/latency/market-sim. |
 | `ml-for-finance` | 2 | HMM regimes, XGBoost with chronological partitions, LSTM, sentiment models. Temporal leakage removed. |
-| `agentic-finance` | 1, 4, 5, 6, 7, 8 | Four agents, MessageBus, AuditTrail, FastAPI REST + WebSocket API, Streamlit and terminal dashboards. Research uses validated adapters, execution reconciles through a ledger, risk enforces halts from it, the API is loopback-by-default with deterministic replay, and state persists across restarts. |
+| `agentic-finance` | 1, 4–8 | Four agents orchestrated by a LangGraph `StateGraph`, with MessageBus notifications, AuditTrail, FastAPI REST + WebSocket API, Streamlit and terminal dashboards. Research uses validated adapters, execution reconciles through a ledger, risk enforces halts, the API is loopback-by-default with deterministic replay, and state persists across restarts. |
 
 ---
 
@@ -364,9 +364,8 @@ phases 1–2. Each is assigned to the phase that will fix it.
   publication to a debug-only, allow-listed namespace. `/health` and `/research`
   identify demo models. Residual: WebSocket auth uses a header (not usable from a
   browser), and there is no rate limiting or TLS — put it behind a proxy.
-- **Claims not implemented** — no LangGraph dependency yet (planned for the
-  orchestration layer), no reinforcement learning, and no toxicity-spike or
-  time-based exits.
+- **Claims not implemented** — no reinforcement learning, and no toxicity-spike
+  or time-based exits.
 
 ---
 
@@ -385,6 +384,7 @@ phases 1–2. Each is assigned to the phase that will fix it.
 | [`evidence/experiment.json`](evidence/experiment.json) | Phase 8 experiment report, holdout metrics and gate results |
 | [`evidence/lockfree-bench.txt`](evidence/lockfree-bench.txt) | Lock-free handoff/snapshot stress and benchmark output |
 | [`docs/lockfree-cpp.md`](docs/lockfree-cpp.md) | What is lock-free, memory ordering, measured results, limits |
+| [`docs/langgraph.md`](docs/langgraph.md) | LangGraph orchestration: nodes, halt edge, determinism |
 | [`docs/persistence.md`](docs/persistence.md) | Durable state: what survives a restart and what does not |
 | [`evidence/W5-07.md`](evidence/W5-07.md) | Historical claim sweep on the earlier revision |
 

@@ -15,6 +15,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "websockets>=13",
+    "langgraph>=0.2",
     "quant-methods",
     "ml-for-finance",
     "ig-market-data",
