@@ -85,6 +85,7 @@ Source: [`agentic-finance/narrative.md`](../agentic-finance/narrative.md)
 | [`phase-7-security-replay.md`](phase-7-security-replay.md) | API security posture, bus restriction, deterministic replay invariants |
 | [`phase-8-experiment.md`](phase-8-experiment.md) | Fixed experiment, holdout result, promotion gates |
 | [`persistence.md`](persistence.md) | Durable SQLite state and restart behaviour |
+| [`lockfree-cpp.md`](lockfree-cpp.md) | Lock-free SPSC handoff, seqlock snapshots, TSan evidence |
 | [`W5-07.md`](W5-07.md) | Claim-sweep: what was removed from the README and why |
 | [`../evidence/W5-07.md`](../evidence/W5-07.md) | Raw command output behind that sweep |
 | [`../evidence/R-03.md`](../evidence/R-03.md) | Independent verification of phases 1–2, defects found, C++ build |

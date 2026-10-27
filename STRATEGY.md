@@ -72,8 +72,12 @@ Deliverables:
 
 ### C++ Layer (pybind11)
 - `cpp/order_book.cpp` — sorted-vector L1/L2 book; linear price-level lookup
-  (K ≤ 100, see ADR-002). Single-threaded, called from Python; no atomics, no
-  lock-free structures, and no GIL release on the boundary yet
+  (K ≤ 100, see ADR-002). Single writer; Python calls release the GIL
+- `cpp/spsc_ring.h` — lock-free bounded SPSC queue (atomic indices,
+  acquire/release); the feed→book handoff
+- `cpp/concurrent_book.h` — single-writer book with lock-free snapshot readers
+  (seqlock over atomics); stress-tested under ThreadSanitizer. See
+  `docs/lockfree-cpp.md` for what is and is not lock-free
 - `cpp/feed_handler.cpp` — string-field tick parsers (`parse_l1_update`,
   `parse_l2_update`, `parse_trade_update`) and a per-epic callback registry;
   parses into `MarketDataMessage` with a nanosecond arrival stamp. No memory

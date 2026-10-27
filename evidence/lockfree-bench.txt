@@ -1,0 +1,11 @@
+﻿Lock-free path — local evidence (2026-10-27)
+OS: Windows 11 x64 | Compiler: MSVC 19.51 | CPU: AMD Ryzen 5 8640HS w/ Radeon 760M Graphics
+
+== stress (functional: ordering, no torn snapshots) ==
+spsc: messages=1000000 consumed=1000000 ordered=yes
+book: updates=500000 valid_snapshots=1182307 torn=0 retries=385033
+STRESS OK
+
+== benchmark ==
+spsc: messages=5000000 total_ms=23.0 ns_per_message=4.6
+book: updates=5000000 total_ms=301.9 ns_per_update=60.4 snapshots=4094610 retries=439566

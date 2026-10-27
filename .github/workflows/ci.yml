@@ -58,3 +58,29 @@ jobs:
           PYTHON="$PWD/.venv/bin/python" bash ./hft-engine/cpp/build_cpp.sh
       - name: hft-engine suite (C++ tests must not skip)
         run: uv run --no-sync --locked pytest hft-engine/tests/ -q -rs
+
+  tsan:
+    name: ThreadSanitizer (ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Build stress test with TSan
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pybind11>=2.12" "cmake>=3.15"
+          cmake -S hft-engine/cpp -B build-tsan \
+            -DHFT_BUILD_STRESS=ON \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DPython_EXECUTABLE="$(which python)" \
+            -DPYBIND11_FINDPYTHON=ON \
+            -Dpybind11_DIR="$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+          cmake --build build-tsan --parallel --target hft_stress
+      - name: Run stress under ThreadSanitizer
+        run: TSAN_OPTIONS="halt_on_error=1 exitcode=66" ./build-tsan/hft_stress
